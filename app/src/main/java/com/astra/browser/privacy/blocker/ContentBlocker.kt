@@ -183,10 +183,29 @@ class ContentBlocker @Inject constructor(
         )
 
         const val COSMETIC_CSS =
+            // Google/general programmatic ad containers
             "ins.adsbygoogle,.adsbygoogle,[id^=\"google_ads_\"],[id^=\"div-gpt-ad\"]," +
             "iframe[src*=\"doubleclick.net\"],iframe[src*=\"googlesyndication\"]," +
             "iframe[id^=\"google_ads_iframe\"],[data-ad-slot],[data-google-query-id]," +
-            ".taboola,.OUTBRAIN,#taboola-below-article,.trc_rbox_container,.ob-widget" +
-            "{display:none!important;visibility:hidden!important;height:0!important;min-height:0!important}"
+            ".taboola,.OUTBRAIN,#taboola-below-article,.trc_rbox_container,.ob-widget," +
+            // Generic class/id name patterns used across most ad-heavy sites
+            // (download portals, anime/streaming sites, link shorteners).
+            "[class*=\"ad-banner\"],[class*=\"ad-container\"],[class*=\"ad-wrapper\"]," +
+            "[class*=\"advert\"],[id*=\"advert\"],[class^=\"ads-\"],[class*=\" ads-\"]," +
+            "[id^=\"ads-\"],[id*=\" ads-\"],[class*=\"banner-ad\"],[id*=\"banner-ad\"]," +
+            "[class*=\"sponsor-\"],[id*=\"sponsor-\"],[class*=\"popup-ad\"],[id*=\"popup-ad\"]," +
+            "[class*=\"sticky-ad\"],[id*=\"sticky-ad\"],[class*=\"interstitial\"]," +
+            "[class*=\"overlay-ad\"],[id*=\"overlay-ad\"]," +
+            // Common third-party ad-network embed containers
+            "[id^=\"ezoic-\"],ins.ezoic-adpicker-ad,[data-ezscrex]," +
+            "iframe[src*=\"exoclick\"],iframe[src*=\"exosrv\"],iframe[src*=\"juicyads\"]," +
+            "iframe[src*=\"propellerads\"],iframe[src*=\"popads\"],iframe[src*=\"adsterra\"]," +
+            "iframe[src*=\"hilltopads\"],iframe[src*=\"mgid.com\"],iframe[src*=\"revcontent\"]," +
+            "div[id^=\"aswift_\"],div[id^=\"google_ads_iframe_\"]," +
+            // Explicit ad-labeled download-lookalike buttons only (never a
+            // generic href/class pattern -- that risks hiding real download
+            // buttons on legitimate file-host sites).
+            ".download-ad,.fake-download,[class*=\"dl-ad\"],[id*=\"dl-ad\"]" +
+            "{display:none!important;visibility:hidden!important;height:0!important;min-height:0!important;pointer-events:none!important}"
     }
 }

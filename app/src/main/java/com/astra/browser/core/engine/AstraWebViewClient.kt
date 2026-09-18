@@ -34,6 +34,13 @@ class AstraWebViewClient(
                 canGoForward = view.canGoForward()
             )
         }
+        // Note: the popunder/click-hijack guard itself now runs via
+        // WebViewCompat.addDocumentStartJavaScript (installed once per
+        // WebView in TabManager), which guarantees it executes before the
+        // page's own scripts -- something evaluateJavascript() from here
+        // cannot guarantee, since onPageStarted can already fire after the
+        // page's <head> scripts have started running.
+
         // Install media hooks as early as possible; YouTube-style SPAs never
         // fire a full page load again after the first one.
         installMediaWatcher(view)

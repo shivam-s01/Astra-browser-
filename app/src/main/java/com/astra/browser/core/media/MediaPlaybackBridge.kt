@@ -31,6 +31,20 @@ class MediaPlaybackBridge @Inject constructor() {
     /** Set by TabManager so the notification's Stop button can pause pages. */
     var pauseAllHandler: (() -> Unit)? = null
 
+    /** Set by TabManager so the lock-screen Play button can resume the active tab's media. */
+    var playAllHandler: (() -> Unit)? = null
+
+    /** Set by TabManager so lock-screen skip buttons can seek the active tab's media by [seconds]. */
+    var seekHandler: ((seconds: Double) -> Unit)? = null
+
+    private val _keepPlayingInBackground = MutableStateFlow(false)
+    val keepPlayingInBackground: StateFlow<Boolean> = _keepPlayingInBackground
+
+    /** Toggled by BackgroundPlaybackController from the "Background playback" setting. */
+    fun setKeepPlayingInBackground(enabled: Boolean) {
+        _keepPlayingInBackground.value = enabled
+    }
+
     init { instance = this }
 
     fun jsInterfaceFor(tabId: String) = JsInterface(tabId)
@@ -51,6 +65,8 @@ class MediaPlaybackBridge @Inject constructor() {
     companion object {
         @Volatile private var instance: MediaPlaybackBridge? = null
         fun requestPauseAll() { instance?.pauseAllHandler?.invoke() }
+        fun requestPlayAll() { instance?.playAllHandler?.invoke() }
+        fun requestSeek(seconds: Double) { instance?.seekHandler?.invoke(seconds) }
     }
 }
 
@@ -80,6 +96,17 @@ class BackgroundPlaybackController @Inject constructor(
 
         val titleFlow = combine(tabManager.tabs, tabManager.activeTabId) { list, id ->
             list.find { it.id == id }?.title?.takeIf { it.isNotBlank() } ?: "Playing in Astra"
+        }
+
+        // Keep the bridge's flag (which every WebView's visibility-spoof JS
+        // reads from) in sync with the user's setting. This is what stops
+        // YouTube (and other sites that pause themselves via the Page
+        // Visibility API) from self-pausing the moment the app goes to the
+        // background, when the user has asked for background playback.
+        scope.launch {
+            settingsStore.backgroundPlayback.distinctUntilChanged().collect { enabled ->
+                bridge.setKeepPlayingInBackground(enabled)
+            }
         }
 
         scope.launch {

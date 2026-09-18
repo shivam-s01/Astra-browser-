@@ -91,6 +91,9 @@ dependencies {
     // WebView + browser support
     implementation("androidx.webkit:webkit:1.12.1")
 
+    // MediaSession (lock-screen / Bluetooth / notification media controls)
+    implementation("androidx.media:media:1.7.0")
+
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
