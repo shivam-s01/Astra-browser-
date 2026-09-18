@@ -2,6 +2,8 @@ package com.astra.browser.ui.browser
 
 import android.content.Context
 import android.util.Patterns
+import android.view.View
+import android.webkit.WebChromeClient
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.astra.browser.core.tabs.TabManager
@@ -40,6 +42,23 @@ class BrowserViewModel @Inject constructor(
     val tabs: StateFlow<List<Tab>> = tabManager.tabs
     val activeTabId: StateFlow<String?> = tabManager.activeTabId
 
+    /**
+     * Holds the fullscreen video view (from onShowCustomView, e.g. YouTube
+     * going fullscreen) and its callback. BrowserScreen renders this as an
+     * overlay when non-null. Resolving `callback.onCustomViewHidden()` on
+     * exit is required by WebView's contract -- skipping it was the actual
+     * cause of the crash-after-visiting-a-video-site bug.
+     */
+    private val _fullscreenView = MutableStateFlow<View?>(null)
+    val fullscreenView: StateFlow<View?> = _fullscreenView
+    private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
+
+    fun exitFullscreen() {
+        fullscreenCallback?.onCustomViewHidden()
+        fullscreenCallback = null
+        _fullscreenView.value = null
+    }
+
     val searchEngine: StateFlow<SearchEngine> = settingsStore.searchEngine
         .map { name -> runCatching { SearchEngine.valueOf(name) }.getOrDefault(SearchEngine.GOOGLE) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, SearchEngine.GOOGLE)
@@ -59,7 +78,19 @@ class BrowserViewModel @Inject constructor(
                 tabId = tabId,
                 tabManager = tabManager,
                 permissionManager = permissionManager,
-                onFullscreenChange = { }
+                onFullscreenChange = { view, callback ->
+                    if (view == null) {
+                        // Site itself dismissed fullscreen (e.g. back press
+                        // inside the page); resolve callback if not already
+                        // done via exitFullscreen().
+                        fullscreenCallback?.onCustomViewHidden()
+                        fullscreenCallback = null
+                        _fullscreenView.value = null
+                    } else {
+                        fullscreenCallback = callback
+                        _fullscreenView.value = view
+                    }
+                }
             )
             // Was never wired before, so tapping a download link (or any
             // file the WebView can't render itself, e.g. a PDF/APK/zip)

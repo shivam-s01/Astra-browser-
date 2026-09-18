@@ -11,7 +11,7 @@ class AstraWebChromeClient(
     private val tabId: String,
     private val tabManager: TabManager,
     private val permissionManager: PermissionManager,
-    private val onFullscreenChange: (View?) -> Unit
+    private val onFullscreenChange: (View?, CustomViewCallback?) -> Unit
 ) : WebChromeClient() {
 
     override fun onProgressChanged(view: WebView, newProgress: Int) {
@@ -26,12 +26,25 @@ class AstraWebChromeClient(
         }
     }
 
+    /**
+     * Video sites (YouTube etc.) call this to go fullscreen. Previously
+     * onFullscreenChange was wired to an empty lambda `{ }`, which meant:
+     *  - the custom view was never actually attached anywhere, so
+     *    fullscreen video had nowhere to render
+     *  - `callback` (CustomViewCallback) was silently dropped and its
+     *    onCustomViewHidden() was NEVER invoked
+     * The second part is the actual crash cause: WebView/Chromium keeps
+     * internal state tied to that callback lifecycle. Never resolving it
+     * left the WebView in a broken internal state that could surface as a
+     * crash on the next navigation (e.g. searching right after visiting a
+     * video-heavy site like YouTube).
+     */
     override fun onShowCustomView(view: View, callback: CustomViewCallback) {
-        onFullscreenChange(view)
+        onFullscreenChange(view, callback)
     }
 
     override fun onHideCustomView() {
-        onFullscreenChange(null)
+        onFullscreenChange(null, null)
     }
 
     override fun onPermissionRequest(request: PermissionRequest) {

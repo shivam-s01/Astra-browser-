@@ -16,6 +16,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.activity.compose.BackHandler
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.astra.browser.theme.LocalAstraColors
@@ -39,6 +41,11 @@ fun BrowserScreen(
     var isAddressBarFocused by remember { mutableStateOf(false) }
     var showBrowserMenu by remember { mutableStateOf(false) }
     var showFindInPage by remember { mutableStateOf(false) }
+    val fullscreenView by viewModel.fullscreenView.collectAsState()
+
+    BackHandler(enabled = fullscreenView != null) {
+        viewModel.exitFullscreen()
+    }
 
     LaunchedEffect(activeTab?.url) {
         if (!isAddressBarFocused) addressBarText = activeTab?.url ?: ""
@@ -125,6 +132,23 @@ fun BrowserScreen(
             onDesktopSite = { activeTab?.let { viewModel.toggleDesktopSite(it.id) }; showBrowserMenu = false },
             onSettings = { navController.navigate(AstraRoutes.SETTINGS); showBrowserMenu = false },
             onPrivacyDashboard = { navController.navigate(AstraRoutes.PRIVACY_DASHBOARD); showBrowserMenu = false }
+        )
+    }
+
+    // Fullscreen video overlay (YouTube etc.). Drawn on top of everything,
+    // including the status bar. This is the fix for onShowCustomView being
+    // dropped entirely before -- without an actual place to attach this
+    // view and resolve its callback, WebView's internal state broke and
+    // the next navigation (e.g. a search right after) could crash.
+    fullscreenView?.let { view ->
+        AndroidView(
+            factory = {
+                (view.parent as? android.view.ViewGroup)?.removeView(view)
+                view
+            },
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
         )
     }
 }
