@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+        Astra is a browser: the WebView must be able to load whatever scheme
+        the user navigates to, including plain HTTP sites the user explicitly
+        visits. This does not weaken Astra's own app traffic, which has none
+        beyond what WebView performs on the user's behalf.
+    -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

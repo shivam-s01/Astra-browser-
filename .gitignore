@@ -1,0 +1,17 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+*.apk
+*.aab
+
+# Keep the wrapper jar bootstrap step in CI; ignore locally generated ones
+# only if you don't want to commit it. Comment the next line out if you'd
+# rather commit gradle-wrapper.jar directly (recommended for reliability).
+gradle/wrapper/gradle-wrapper.jar

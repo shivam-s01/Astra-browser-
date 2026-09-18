@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Astra Browser</string>
+    <string name="new_tab">New Tab</string>
+    <string name="new_private_tab">New Private Tab</string>
+    <string name="astra_settings">Astra Settings</string>
+    <string name="astra_privacy">Astra Privacy</string>
+    <string name="astra_downloads">Astra Downloads</string>
+    <string name="astra_bookmarks">Astra Bookmarks</string>
+    <string name="private_mode_notice">Private tabs aren\'t saved to history or bookmarks and are cleared when closed. Your activity may still be visible to your network, employer, or the sites you visit.</string>
+</resources>
