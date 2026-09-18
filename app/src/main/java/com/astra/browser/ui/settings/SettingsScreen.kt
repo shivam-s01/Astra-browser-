@@ -42,6 +42,7 @@ class SettingsViewModel @Inject constructor(private val store: SettingsStore) : 
     val askBeforeDownload = store.askBeforeDownload.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val reducedMotion = store.reducedMotion.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val textScale = store.textScale.stateIn(viewModelScope, SharingStarted.Eagerly, 1.0f)
+    val backgroundPlayback = store.backgroundPlayback.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     fun setHomepage(v: String) = viewModelScope.launch { store.setHomepage(v) }
     fun setSearchEngine(v: String) = viewModelScope.launch { store.setSearchEngine(v) }
@@ -58,6 +59,7 @@ class SettingsViewModel @Inject constructor(private val store: SettingsStore) : 
     fun setAskBeforeDownload(v: Boolean) = viewModelScope.launch { store.setAskBeforeDownload(v) }
     fun setReducedMotion(v: Boolean) = viewModelScope.launch { store.setReducedMotion(v) }
     fun setTextScale(v: Float) = viewModelScope.launch { store.setTextScale(v) }
+    fun setBackgroundPlayback(v: Boolean) = viewModelScope.launch { store.setBackgroundPlayback(v) }
     fun resetAll() = viewModelScope.launch { store.resetAll() }
 }
 
@@ -147,6 +149,17 @@ fun SettingsScreen(navController: NavController, viewModel: SettingsViewModel = 
             item {
                 val v by viewModel.askBeforeDownload.collectAsState()
                 SwitchSetting("Ask before downloading", "Confirm each download's destination", v, viewModel::setAskBeforeDownload)
+            }
+
+            item { SectionHeader("Media") }
+            item {
+                val v by viewModel.backgroundPlayback.collectAsState()
+                SwitchSetting(
+                    "Background playback",
+                    "Keep audio/video playing when you leave Astra (shows a notification while active)",
+                    v,
+                    viewModel::setBackgroundPlayback
+                )
             }
 
             item { SectionHeader("Accessibility") }

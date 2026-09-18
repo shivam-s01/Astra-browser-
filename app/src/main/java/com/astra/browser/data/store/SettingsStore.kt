@@ -39,6 +39,7 @@ class SettingsStore @Inject constructor(
         val SHOW_SHORTCUTS = booleanPreferencesKey("show_shortcuts")
         val SHOW_CLOCK = booleanPreferencesKey("show_clock")
         val SHOW_RECENT_SITES = booleanPreferencesKey("show_recent_sites")
+        val BACKGROUND_PLAYBACK = booleanPreferencesKey("background_playback")
     }
 
     val homepage: Flow<String> = context.dataStore.data.map { it[Keys.HOMEPAGE] ?: "astra://newtab" }
@@ -65,6 +66,7 @@ class SettingsStore @Inject constructor(
     val showShortcuts: Flow<Boolean> = context.dataStore.data.map { it[Keys.SHOW_SHORTCUTS] ?: true }
     val showClock: Flow<Boolean> = context.dataStore.data.map { it[Keys.SHOW_CLOCK] ?: true }
     val showRecentSites: Flow<Boolean> = context.dataStore.data.map { it[Keys.SHOW_RECENT_SITES] ?: true }
+    val backgroundPlayback: Flow<Boolean> = context.dataStore.data.map { it[Keys.BACKGROUND_PLAYBACK] ?: false }
 
     suspend fun setHomepage(value: String) = edit { it[Keys.HOMEPAGE] = value }
     suspend fun setSearchEngine(value: String) = edit { it[Keys.SEARCH_ENGINE] = value }
@@ -94,6 +96,7 @@ class SettingsStore @Inject constructor(
     suspend fun setShowShortcuts(value: Boolean) = edit { it[Keys.SHOW_SHORTCUTS] = value }
     suspend fun setShowClock(value: Boolean) = edit { it[Keys.SHOW_CLOCK] = value }
     suspend fun setShowRecentSites(value: Boolean) = edit { it[Keys.SHOW_RECENT_SITES] = value }
+    suspend fun setBackgroundPlayback(value: Boolean) = edit { it[Keys.BACKGROUND_PLAYBACK] = value }
 
     suspend fun resetAll() = context.dataStore.edit { it.clear() }
 

@@ -32,7 +32,12 @@ fun AstraWebViewHost(
         update = { webView ->
             settings_applyDesktopMode(webView, tab.desktopSiteEnabled)
 
-            if (webView.url.isNullOrBlank() && tab.url.isNotBlank()) {
+            // Only load when the tab's URL actually changed from what this
+            // WebView last loaded (e.g. address-bar navigation, reopen). We
+            // compare against webView.url (the WebView's own current URL)
+            // rather than re-triggering on every recomposition, which is
+            // what previously caused reloads/tears-down mid-navigation.
+            if (tab.url.isNotBlank() && webView.url != tab.url && webView.url == null) {
                 webView.loadUrl(tab.url)
             }
         }

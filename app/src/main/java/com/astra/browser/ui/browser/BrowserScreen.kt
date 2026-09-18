@@ -10,6 +10,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -46,7 +47,7 @@ fun BrowserScreen(
     Scaffold(
         containerColor = colors.background,
         topBar = {
-            Column {
+            Column(modifier = Modifier.statusBarsPadding()) {
                 AstraToolbar(
                     addressText = addressBarText,
                     onAddressChange = { addressBarText = it },
@@ -59,10 +60,7 @@ fun BrowserScreen(
                     canGoForward = activeTab?.canGoForward ?: false,
                     tabCount = tabs.size,
                     onNavigate = { input ->
-                        val resolved = viewModel.resolveInput(input)
-                        activeTab?.let { tab ->
-                            viewModel.tabManager.getWebView(tab.id)?.loadUrl(resolved)
-                        }
+                        activeTab?.let { tab -> viewModel.navigate(tab.id, input) }
                     },
                     onBack = { activeTab?.let { viewModel.tabManager.getWebView(it.id)?.goBack() } },
                     onForward = { activeTab?.let { viewModel.tabManager.getWebView(it.id)?.goForward() } },
@@ -94,11 +92,10 @@ fun BrowserScreen(
         }
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
-            if (activeTab == null || activeTab.url.isBlank()) {
+            if (activeTab == null || activeTab.isBlankTab) {
                 NewTabPage(
                     onNavigate = { input ->
-                        val resolved = viewModel.resolveInput(input)
-                        activeTab?.let { viewModel.tabManager.getWebView(it.id)?.loadUrl(resolved) }
+                        activeTab?.let { tab -> viewModel.navigate(tab.id, input) }
                     }
                 )
             } else {

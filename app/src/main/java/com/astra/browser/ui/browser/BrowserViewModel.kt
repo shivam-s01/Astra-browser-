@@ -13,6 +13,8 @@ import com.astra.browser.domain.model.SearchEngine
 import com.astra.browser.domain.model.Tab
 import com.astra.browser.core.engine.AstraWebChromeClient
 import com.astra.browser.core.engine.AstraWebViewClient
+import com.astra.browser.core.engine.AstraDownloadManager
+import com.astra.browser.core.media.BackgroundPlaybackController
 import com.astra.browser.privacy.blocker.ContentBlocker
 import com.astra.browser.privacy.permissions.PermissionManager
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -30,7 +32,9 @@ class BrowserViewModel @Inject constructor(
     private val closedTabRepository: ClosedTabRepository,
     private val contentBlocker: ContentBlocker,
     private val permissionManager: PermissionManager,
-    private val settingsStore: SettingsStore
+    private val settingsStore: SettingsStore,
+    private val downloadManager: AstraDownloadManager,
+    private val backgroundPlaybackController: BackgroundPlaybackController
 ) : ViewModel() {
 
     val tabs: StateFlow<List<Tab>> = tabManager.tabs
@@ -57,6 +61,15 @@ class BrowserViewModel @Inject constructor(
                 permissionManager = permissionManager,
                 onFullscreenChange = { }
             )
+            // Was never wired before, so tapping a download link (or any
+            // file the WebView can't render itself, e.g. a PDF/APK/zip)
+            // silently did nothing. Route it to the real system
+            // DownloadManager-backed flow.
+            webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+                viewModelScope.launch {
+                    downloadManager.startDownload(url, userAgent, contentDisposition, mimeType)
+                }
+            }
         }
 
         viewModelScope.launch {
@@ -69,6 +82,17 @@ class BrowserViewModel @Inject constructor(
         if (tabManager.tabs.value.isEmpty()) {
             tabManager.createTab(context)
         }
+
+        val activeTabTitle: StateFlow<String> = tabs
+            .combine(activeTabId) { list, id -> list.find { it.id == id }?.title ?: "Playing in Astra" }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, "Playing in Astra")
+
+        backgroundPlaybackController.start(
+            scope = viewModelScope,
+            backgroundPlaybackEnabled = settingsStore.backgroundPlayback
+                .stateIn(viewModelScope, SharingStarted.Eagerly, false),
+            activeTabTitle = activeTabTitle
+        )
     }
 
     fun newTab(isPrivate: Boolean = false) {
@@ -102,6 +126,21 @@ class BrowserViewModel @Inject constructor(
             looksLikeUrl -> "https://$trimmed"
             else -> buildSearchUrl(trimmed)
         }
+    }
+
+    /**
+     * Single entry point for user-initiated navigation (address bar, new-tab
+     * shortcuts, etc). Updates Tab state synchronously BEFORE touching the
+     * WebView so Compose never recomposes with a stale/blank tab.url while a
+     * load is already in flight. That mismatch was what caused the WebView
+     * host to get torn down and recreated mid-navigation -> crash on search.
+     */
+    fun navigate(tabId: String, input: String) {
+        val resolved = resolveInput(input)
+        tabManager.updateTab(tabId) {
+            it.copy(url = resolved, isBlankTab = false, isLoading = true, loadProgress = 0)
+        }
+        tabManager.getWebView(tabId)?.loadUrl(resolved)
     }
 
     private fun buildSearchUrl(query: String): String {

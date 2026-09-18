@@ -22,7 +22,15 @@ data class Tab(
     val lastAccessedAt: Long = System.currentTimeMillis(),
     val thumbnailPath: String? = null,
     val desktopSiteEnabled: Boolean = false,
-    val trackersBlockedCount: Int = 0
+    val trackersBlockedCount: Int = 0,
+    /**
+     * True only until the very first navigation is dispatched for this tab.
+     * Drives the NewTabPage <-> WebView switch in BrowserScreen. We deliberately
+     * do NOT use `url.isBlank()` for this (that flips unreliably the instant a
+     * navigation is in flight but onPageStarted hasn't landed yet, which was
+     * tearing down/recreating the live WebView mid-load and crashing).
+     */
+    val isBlankTab: Boolean = true
 )
 
 enum class SearchEngine(val displayName: String, val searchUrlTemplate: String, val homeUrl: String) {

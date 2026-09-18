@@ -24,6 +24,7 @@ class AstraWebViewClient(
         tabManager.updateTab(tabId) {
             it.copy(
                 url = url,
+                isBlankTab = false,
                 isLoading = true,
                 loadProgress = 0,
                 isSecure = url.startsWith("https://"),
@@ -47,7 +48,41 @@ class AstraWebViewClient(
                 trackersBlockedCount = contentBlocker.blockedCountForTab(tabId)
             )
         }
+        injectMediaPlaybackWatcher(view)
         onPageFinished(tabId, url)
+    }
+
+    /**
+     * Lightweight JS hook so Astra knows when a <video>/<audio> element on
+     * the page starts or stops playing. This is what lets "Background
+     * playback" (Settings) know whether there's actually anything to keep
+     * alive — without it we'd have to guess, or keep every tab alive always
+     * (a real battery drain), or never support it at all.
+     */
+    private fun injectMediaPlaybackWatcher(view: WebView) {
+        view.evaluateJavascript(
+            """
+            (function() {
+                if (window.__astraMediaWatcherInstalled) return;
+                window.__astraMediaWatcherInstalled = true;
+                function attach(el) {
+                    el.addEventListener('play', function() { AstraMedia.onPlaybackState(true); });
+                    el.addEventListener('pause', function() { AstraMedia.onPlaybackState(false); });
+                    el.addEventListener('ended', function() { AstraMedia.onPlaybackState(false); });
+                }
+                document.querySelectorAll('video, audio').forEach(attach);
+                new MutationObserver(function(mutations) {
+                    mutations.forEach(function(m) {
+                        m.addedNodes && m.addedNodes.forEach(function(node) {
+                            if (node.tagName === 'VIDEO' || node.tagName === 'AUDIO') attach(node);
+                            if (node.querySelectorAll) node.querySelectorAll('video, audio').forEach(attach);
+                        });
+                    });
+                }).observe(document.body || document.documentElement, { childList: true, subtree: true });
+            })();
+            """.trimIndent(),
+            null
+        )
     }
 
     override fun shouldInterceptRequest(

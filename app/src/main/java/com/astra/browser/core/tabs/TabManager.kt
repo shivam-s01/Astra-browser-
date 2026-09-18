@@ -2,6 +2,7 @@ package com.astra.browser.core.tabs
 
 import android.content.Context
 import android.webkit.WebView
+import com.astra.browser.core.media.MediaPlaybackBridge
 import com.astra.browser.domain.model.Tab
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -18,7 +19,9 @@ import javax.inject.Singleton
  * browser behavior rather than destroying/recreating on every switch.
  */
 @Singleton
-class TabManager @Inject constructor() {
+class TabManager @Inject constructor(
+    private val mediaPlaybackBridge: MediaPlaybackBridge
+) {
 
     private val _tabs = MutableStateFlow<List<Tab>>(emptyList())
     val tabs: StateFlow<List<Tab>> = _tabs
@@ -37,8 +40,9 @@ class TabManager @Inject constructor() {
     fun getWebView(tabId: String): WebView? = webViews[tabId]
 
     fun createTab(context: Context, isPrivate: Boolean = false, url: String? = null): Tab {
-        val tab = Tab(isPrivate = isPrivate, url = url ?: "")
+        val tab = Tab(isPrivate = isPrivate, url = url ?: "", isBlankTab = url.isNullOrBlank())
         val webView = createConfiguredWebView(context, isPrivate)
+        webView.addJavascriptInterface(mediaPlaybackBridge.jsInterfaceFor(tab.id), "AstraMedia")
         webViews[tab.id] = webView
         webViewConfigurer?.invoke(tab.id, webView)
         _tabs.update { it + tab }
@@ -54,6 +58,7 @@ class TabManager @Inject constructor() {
             destroy()
         }
         webViews.remove(tabId)
+        mediaPlaybackBridge.clearTab(tabId)
         _tabs.update { list -> list.filterNot { it.id == tabId } }
 
         if (_activeTabId.value == tabId) {
@@ -105,15 +110,33 @@ class TabManager @Inject constructor() {
                 builtInZoomControls = true
                 displayZoomControls = false
                 mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
-                mediaPlaybackRequiresUserGesture = true
+                // Video sites (YouTube etc.) need this false, or autoplay /
+                // inline playback / fullscreen video breaks on first tap.
+                mediaPlaybackRequiresUserGesture = false
                 setSupportMultipleWindows(true)
                 javaScriptCanOpenWindowsAutomatically = false
+
+                // --- Required for modern sites (YouTube, Gmail, Twitter/X,
+                // anything React/Vue-based) to lay out and behave correctly.
+                // These were missing entirely before, which is the main
+                // reason complex sites rendered broken or refused to load
+                // their full desktop-grade UI/scripts.
+                useWideViewPort = true
+                loadWithOverviewMode = true
+                allowContentAccess = true
+                allowFileAccess = false // security: no arbitrary file:// reads
+                loadsImagesAutomatically = true
+                textZoom = 100
+                setRenderPriority(android.webkit.WebSettings.RenderPriority.HIGH)
             }
 
-            if (isPrivate) {
-                // Private tabs get an isolated, non-persistent cookie jar.
-                android.webkit.CookieManager.getInstance().setAcceptCookie(false)
-            }
+            // Hardware-accelerated layer for smooth scrolling/video on heavy
+            // pages (matches the Activity's android:hardwareAccelerated flag).
+            setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
+
+            val cookieManager = android.webkit.CookieManager.getInstance()
+            cookieManager.setAcceptCookie(true) // Astra's own tracking-protection layer decides third-party blocking per-request; site login state needs first-party cookies even in private mode.
+            cookieManager.setAcceptThirdPartyCookies(this, !isPrivate)
         }
     }
 }
