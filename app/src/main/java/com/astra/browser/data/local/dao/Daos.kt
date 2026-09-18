@@ -77,6 +77,12 @@ interface DownloadDao {
 
     @Query("SELECT * FROM downloads WHERE id = :id")
     suspend fun getById(id: Long): DownloadEntity?
+
+    @Query("SELECT * FROM downloads WHERE systemDownloadId = :systemDownloadId LIMIT 1")
+    suspend fun getBySystemId(systemDownloadId: Long): DownloadEntity?
+
+    @Query("SELECT * FROM downloads WHERE status IN ('RUNNING','PENDING','PAUSED')")
+    suspend fun getActive(): List<DownloadEntity>
 }
 
 @Dao

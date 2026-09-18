@@ -5,19 +5,20 @@ import android.content.Intent
 import android.os.Build
 import android.webkit.JavascriptInterface
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * One instance shared app-wide. Each tab's WebView gets its own
- * addJavascriptInterface("AstraMedia", ...) call but they all report into
- * this single tracker, since only one foreground notification/service is
- * needed regardless of how many tabs are playing something.
+ * App-wide tracker of which tabs are currently playing media.
+ * JS callbacks arrive on a WebView background thread, hence the concurrent set.
  */
 @Singleton
 class MediaPlaybackBridge @Inject constructor() {
@@ -25,7 +26,12 @@ class MediaPlaybackBridge @Inject constructor() {
     private val _isAnyTabPlaying = MutableStateFlow(false)
     val isAnyTabPlaying: StateFlow<Boolean> = _isAnyTabPlaying
 
-    private val playingTabIds = mutableSetOf<String>()
+    private val playingTabIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Set by TabManager so the notification's Stop button can pause pages. */
+    var pauseAllHandler: (() -> Unit)? = null
+
+    init { instance = this }
 
     fun jsInterfaceFor(tabId: String) = JsInterface(tabId)
 
@@ -41,31 +47,57 @@ class MediaPlaybackBridge @Inject constructor() {
             _isAnyTabPlaying.value = playingTabIds.isNotEmpty()
         }
     }
+
+    companion object {
+        @Volatile private var instance: MediaPlaybackBridge? = null
+        fun requestPauseAll() { instance?.pauseAllHandler?.invoke() }
+    }
 }
 
 /**
  * Starts/stops [BackgroundPlaybackService] to match real playback state,
- * gated by the user's "Background playback" setting. Call [start] once
- * (e.g. from AstraApplication or the top-level ViewModel) and it runs for
- * the process lifetime.
+ * gated by the "Background playback" setting. Singleton so it is only ever
+ * started once (a second collector would start the service twice).
  */
+@Singleton
 class BackgroundPlaybackController @Inject constructor(
     @dagger.hilt.android.qualifiers.ApplicationContext private val context: Context,
-    private val bridge: MediaPlaybackBridge
+    private val bridge: MediaPlaybackBridge,
+    private val settingsStore: com.astra.browser.data.store.SettingsStore,
+    private val tabManager: com.astra.browser.core.tabs.TabManager
 ) {
-    fun start(scope: CoroutineScope, backgroundPlaybackEnabled: StateFlow<Boolean>, activeTabTitle: StateFlow<String>) {
+    private var started = false
+
+    // Own process-lifetime scope. Using a ViewModel's scope made the
+    // collector die when the ViewModel was cleared, so background playback
+    // silently stopped working after e.g. a configuration change.
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /** Idempotent: safe to call from every ViewModel/Activity creation. */
+    fun start() {
+        if (started) return
+        started = true
+
+        val titleFlow = combine(tabManager.tabs, tabManager.activeTabId) { list, id ->
+            list.find { it.id == id }?.title?.takeIf { it.isNotBlank() } ?: "Playing in Astra"
+        }
+
         scope.launch {
-            combine(bridge.isAnyTabPlaying, backgroundPlaybackEnabled, activeTabTitle) { playing, enabled, title ->
-                Triple(playing, enabled, title)
-            }.distinctUntilChanged().collect { (playing, enabled, title) ->
-                val shouldRun = playing && enabled
+            combine(bridge.isAnyTabPlaying, settingsStore.backgroundPlayback, titleFlow) { playing, enabled, title ->
+                (playing && enabled) to title
+            }.distinctUntilChanged().collect { (shouldRun, title) ->
                 val intent = Intent(context, BackgroundPlaybackService::class.java)
                 if (shouldRun) {
                     intent.putExtra(BackgroundPlaybackService.EXTRA_TITLE, title)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        context.startForegroundService(intent)
-                    } else {
-                        context.startService(intent)
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            context.startForegroundService(intent)
+                        } else {
+                            context.startService(intent)
+                        }
+                    } catch (e: Exception) {
+                        // Android 12+ may refuse a foreground-service start
+                        // from the background; never crash over it.
                     }
                 } else {
                     context.stopService(intent)

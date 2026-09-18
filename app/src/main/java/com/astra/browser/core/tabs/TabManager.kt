@@ -34,6 +34,51 @@ class TabManager @Inject constructor(
     /** Set once by the browser UI layer; attaches clients to every new WebView. */
     var webViewConfigurer: ((tabId: String, webView: WebView) -> Unit)? = null
 
+    init {
+        // Notification "Stop" button -> pause every <video>/<audio> on every tab.
+        mediaPlaybackBridge.pauseAllHandler = {
+            webViews.values.forEach { wv ->
+                wv.post {
+                    wv.evaluateJavascript(
+                        "document.querySelectorAll('video,audio').forEach(function(e){try{e.pause()}catch(x){}})",
+                        null
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * App went to the background. Freeze every INACTIVE tab (saves CPU/heat),
+     * but if [keepMediaAlive] is true leave the WebViews running so audio
+     * keeps playing. Chromium otherwise suspends media the moment its host
+     * Activity stops -- this is what made "background play" never work.
+     */
+    fun onAppBackgrounded(keepMediaAlive: Boolean) {
+        if (keepMediaAlive) {
+            webViews.values.forEach { it.onResume(); it.resumeTimers() }
+        } else {
+            webViews.values.forEach { it.onPause() }
+            webViews.values.firstOrNull()?.pauseTimers()
+        }
+    }
+
+    fun onAppForegrounded() {
+        webViews.values.forEach { it.onResume() }
+        webViews.values.firstOrNull()?.resumeTimers()
+    }
+
+    /** Frees memory of tabs not looked at for a while (lightweight / cool). */
+    fun trimBackgroundTabs(level: Int) {
+        val active = _activeTabId.value
+        webViews.forEach { (id, wv) ->
+            if (id != active) {
+                wv.clearCache(false)
+                if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_MODERATE) wv.freeMemory()
+            }
+        }
+    }
+
     val activeTab: Tab?
         get() = _tabs.value.find { it.id == _activeTabId.value }
 
@@ -127,12 +172,16 @@ class TabManager @Inject constructor(
                 allowFileAccess = false // security: no arbitrary file:// reads
                 loadsImagesAutomatically = true
                 textZoom = 100
-                setRenderPriority(android.webkit.WebSettings.RenderPriority.HIGH)
+                // (setRenderPriority is deprecated & a no-op on modern WebView;
+                // removed. Forcing HIGH only encouraged extra CPU work.)
+                offscreenPreRaster = false // don't rasterize off-screen content -> less GPU/heat
+                safeBrowsingEnabled = true
             }
 
-            // Hardware-accelerated layer for smooth scrolling/video on heavy
-            // pages (matches the Activity's android:hardwareAccelerated flag).
-            setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
+            // Default layer type (hardware via the Activity's flag). Forcing
+            // LAYER_TYPE_HARDWARE on the WebView itself allocates an extra
+            // full-screen GPU texture per tab -> more memory and heat.
+            overScrollMode = android.view.View.OVER_SCROLL_NEVER
 
             val cookieManager = android.webkit.CookieManager.getInstance()
             cookieManager.setAcceptCookie(true) // Astra's own tracking-protection layer decides third-party blocking per-request; site login state needs first-party cookies even in private mode.

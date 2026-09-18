@@ -41,9 +41,9 @@ git push origin v1.0.0
 
 ## Known platform-limited items
 
-- Tracker/ad blocking uses a small curated hosts list as a starting point —
-  swap in a maintained EasyList/EasyPrivacy-derived host set for production
-  coverage.
+- Ad/tracker blocking loads `assets/blocklist_hosts.txt`. CI regenerates it from
+  EasyList + EasyPrivacy + Peter Lowe on every build (see `build.yml`), so the
+  APK ships a full-size list. The committed file is only a small fallback.
 - Reader mode and full fingerprinting protection are not yet implemented in
   this scaffold and should be added as a next milestone.
 - Setting Astra as the default browser requires Android's default-app flow,

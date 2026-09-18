@@ -38,6 +38,34 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      - name: Generate ad/tracker blocklist (EasyList + EasyPrivacy + Peter Lowe)
+        run: |
+          mkdir -p app/src/main/assets
+          OUT=app/src/main/assets/blocklist_hosts.txt
+          TMP=$(mktemp)
+          # Keep the bundled starter list as a floor in case a download fails.
+          cp "$OUT" "$TMP" 2>/dev/null || true
+          fetch() { curl -fsSL --retry 3 --max-time 60 "$1" || true; }
+
+          # Peter Lowe's list: already plain hostnames.
+          fetch "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=nohtml&showintro=0&mimetype=plaintext" >> "$TMP"
+
+          # EasyList / EasyPrivacy: extract only pure-domain rules of the form ||example.com^
+          for u in \
+            "https://easylist.to/easylist/easylist.txt" \
+            "https://easylist.to/easylist/easyprivacy.txt"; do
+            fetch "$u" | grep -E '^\|\|[a-z0-9.-]+\^(\$third-party)?$' \
+              | sed -E 's/^\|\|//; s/\^.*$//' >> "$TMP"
+          done
+
+          # Normalise, drop comments/junk, dedupe.
+          tr 'A-Z' 'a-z' < "$TMP" | sed 's/\r//' \
+            | grep -E '^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$' | sort -u > "$OUT"
+
+          # Safety: never block hosts the browser itself depends on.
+          grep -vE '^(google\.com|gstatic\.com|googleapis\.com|youtube\.com|ytimg\.com|googlevideo\.com|github\.com|githubusercontent\.com|cloudflare\.com|jsdelivr\.net|cdnjs\.cloudflare\.com)$' "$OUT" > "$OUT.tmp" && mv "$OUT.tmp" "$OUT"
+          echo "Blocklist entries: $(wc -l < "$OUT")"
+
       - name: Build debug APK
         run: ./gradlew assembleDebug --stacktrace
 

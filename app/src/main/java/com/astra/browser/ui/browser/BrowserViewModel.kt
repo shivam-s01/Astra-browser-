@@ -63,6 +63,8 @@ class BrowserViewModel @Inject constructor(
         .map { name -> runCatching { SearchEngine.valueOf(name) }.getOrDefault(SearchEngine.GOOGLE) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, SearchEngine.GOOGLE)
 
+    @Volatile private var blockPopupsEnabled = true
+
     val customSearchUrl: StateFlow<String> =
         settingsStore.customSearchUrl.stateIn(viewModelScope, SharingStarted.Eagerly, "")
 
@@ -78,6 +80,13 @@ class BrowserViewModel @Inject constructor(
                 tabId = tabId,
                 tabManager = tabManager,
                 permissionManager = permissionManager,
+                onNewWindowRequested = { url, _ ->
+                    // Open target=_blank / window.open in a real new tab.
+                    viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                        tabManager.createTab(context, url = url)
+                    }
+                },
+                popupsBlocked = { blockPopupsEnabled },
                 onFullscreenChange = { view, callback ->
                     if (view == null) {
                         // Site itself dismissed fullscreen (e.g. back press
@@ -98,9 +107,18 @@ class BrowserViewModel @Inject constructor(
             // DownloadManager-backed flow.
             webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
                 viewModelScope.launch {
-                    downloadManager.startDownload(url, userAgent, contentDisposition, mimeType)
+                    try {
+                        downloadManager.startDownload(url, userAgent, contentDisposition, mimeType)
+                        android.widget.Toast.makeText(context, "Download started", android.widget.Toast.LENGTH_SHORT).show()
+                    } catch (e: Exception) {
+                        android.widget.Toast.makeText(context, "Download failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                    }
                 }
             }
+        }
+
+        viewModelScope.launch {
+            settingsStore.blockPopups.collect { blockPopupsEnabled = it }
         }
 
         viewModelScope.launch {
@@ -114,16 +132,8 @@ class BrowserViewModel @Inject constructor(
             tabManager.createTab(context)
         }
 
-        val activeTabTitle: StateFlow<String> = tabs
-            .combine(activeTabId) { list, id -> list.find { it.id == id }?.title ?: "Playing in Astra" }
-            .stateIn(viewModelScope, SharingStarted.Eagerly, "Playing in Astra")
 
-        backgroundPlaybackController.start(
-            scope = viewModelScope,
-            backgroundPlaybackEnabled = settingsStore.backgroundPlayback
-                .stateIn(viewModelScope, SharingStarted.Eagerly, false),
-            activeTabTitle = activeTabTitle
-        )
+        backgroundPlaybackController.start()
     }
 
     fun newTab(isPrivate: Boolean = false) {

@@ -25,3 +25,10 @@
 -keepclasseswithmembers class kotlinx.serialization.json.** {
     kotlinx.serialization.KSerializer serializer(...);
 }
+
+# Astra: keep Room entities/DAOs and our JS bridge intact in release builds
+-keep class com.astra.browser.data.local.entity.** { *; }
+-keep class com.astra.browser.core.media.MediaPlaybackBridge$JsInterface { *; }
+-keepclassmembers class com.astra.browser.core.media.MediaPlaybackBridge$JsInterface {
+    @android.webkit.JavascriptInterface <methods>;
+}

@@ -1,15 +1,17 @@
 package com.astra.browser.core.engine
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.graphics.Bitmap
+import android.net.Uri
 import android.net.http.SslError
 import android.webkit.*
 import com.astra.browser.core.tabs.TabManager
 import com.astra.browser.privacy.blocker.ContentBlocker
 
 /**
- * Drives tab state (loading, progress, secure indicator, back/forward
- * availability) from real WebView lifecycle callbacks, and routes every
- * outgoing request through ContentBlocker for genuine interception.
+ * Drives tab state from real WebView lifecycle callbacks and routes every
+ * outgoing request through ContentBlocker.
  */
 class AstraWebViewClient(
     private val tabId: String,
@@ -32,6 +34,9 @@ class AstraWebViewClient(
                 canGoForward = view.canGoForward()
             )
         }
+        // Install media hooks as early as possible; YouTube-style SPAs never
+        // fire a full page load again after the first one.
+        installMediaWatcher(view)
     }
 
     override fun onPageFinished(view: WebView, url: String) {
@@ -48,27 +53,69 @@ class AstraWebViewClient(
                 trackersBlockedCount = contentBlocker.blockedCountForTab(tabId)
             )
         }
-        injectMediaPlaybackWatcher(view)
+        installMediaWatcher(view)
+        injectCosmeticFilter(view, url)
         onPageFinished(tabId, url)
     }
 
+    /** SPA route changes (YouTube etc.) update the URL without a page load. */
+    override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+        super.doUpdateVisitedHistory(view, url, isReload)
+        tabManager.updateTab(tabId) {
+            it.copy(
+                url = url,
+                canGoBack = view.canGoBack(),
+                canGoForward = view.canGoForward()
+            )
+        }
+    }
+
     /**
-     * Lightweight JS hook so Astra knows when a <video>/<audio> element on
-     * the page starts or stops playing. This is what lets "Background
-     * playback" (Settings) know whether there's actually anything to keep
-     * alive — without it we'd have to guess, or keep every tab alive always
-     * (a real battery drain), or never support it at all.
+     * Hides the empty boxes ad networks leave behind. Only when ad blocking
+     * is on and this site hasn't been exempted.
      */
-    private fun injectMediaPlaybackWatcher(view: WebView) {
+    private fun injectCosmeticFilter(view: WebView, url: String) {
+        val origin = contentBlocker.originOf(url)
+        if (!contentBlocker.adBlockingOn() || !contentBlocker.isEnabledFor(origin)) return
+        val css = contentBlocker.cosmeticCss().replace("\\", "\\\\").replace("'", "\\'")
+        view.evaluateJavascript(
+            """
+            (function(){
+                if (document.getElementById('__astra_cosmetic')) return;
+                var s = document.createElement('style');
+                s.id = '__astra_cosmetic';
+                s.textContent = '$css';
+                (document.head || document.documentElement).appendChild(s);
+            })();
+            """.trimIndent(),
+            null
+        )
+    }
+
+    /**
+     * Reports <video>/<audio> play/pause to the app so Background playback
+     * knows if anything is actually playing. Idempotent, and also watches
+     * for elements added later (SPAs).
+     */
+    private fun installMediaWatcher(view: WebView) {
         view.evaluateJavascript(
             """
             (function() {
                 if (window.__astraMediaWatcherInstalled) return;
                 window.__astraMediaWatcherInstalled = true;
+                function report() {
+                    var playing = false;
+                    document.querySelectorAll('video, audio').forEach(function(el) {
+                        if (!el.paused && !el.ended && el.readyState > 2) playing = true;
+                    });
+                    try { AstraMedia.onPlaybackState(playing); } catch (e) {}
+                }
                 function attach(el) {
-                    el.addEventListener('play', function() { AstraMedia.onPlaybackState(true); });
-                    el.addEventListener('pause', function() { AstraMedia.onPlaybackState(false); });
-                    el.addEventListener('ended', function() { AstraMedia.onPlaybackState(false); });
+                    if (el.__astraAttached) return;
+                    el.__astraAttached = true;
+                    ['play','playing','pause','ended','emptied','waiting'].forEach(function(ev) {
+                        el.addEventListener(ev, report, true);
+                    });
                 }
                 document.querySelectorAll('video, audio').forEach(attach);
                 new MutationObserver(function(mutations) {
@@ -78,7 +125,8 @@ class AstraWebViewClient(
                             if (node.querySelectorAll) node.querySelectorAll('video, audio').forEach(attach);
                         });
                     });
-                }).observe(document.body || document.documentElement, { childList: true, subtree: true });
+                }).observe(document.documentElement, { childList: true, subtree: true });
+                report();
             })();
             """.trimIndent(),
             null
@@ -89,18 +137,8 @@ class AstraWebViewClient(
         view: WebView,
         request: WebResourceRequest
     ): WebResourceResponse? {
-        // shouldInterceptRequest is called by Chromium on a background
-        // thread (not the main/UI thread). Calling ANY WebView method
-        // (view.getUrl(), view.getTitle(), etc.) from here throws --
-        // WebView enforces that all its methods run on the thread that
-        // created it. This was the actual crash: `view.url` below used to
-        // call the real WebView.getUrl() getter from that background
-        // thread on every single request the page made (i.e. constantly),
-        // which is why it crashed on essentially any navigation/search.
-        //
-        // Fix: read the page's current URL from TabManager's state
-        // instead -- it's a plain in-memory value backed by a StateFlow,
-        // safe to read from any thread, no WebView call involved.
+        // Runs on a Chromium IO thread: never call WebView methods here.
+        // Read the page URL from TabManager's in-memory state instead.
         val pageUrl = tabManager.tabs.value.find { it.id == tabId }?.url ?: ""
         val pageOrigin = contentBlocker.originOf(pageUrl)
         contentBlocker.intercept(tabId, pageOrigin, request)?.let { return it }
@@ -108,20 +146,57 @@ class AstraWebViewClient(
     }
 
     override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) {
-        // Never silently proceed past a genuine cert error — cancel by
-        // default and surface it as an error page rather than pretending
-        // the connection is secure.
         handler.cancel()
         tabManager.updateTab(tabId) { it.copy(isSecure = false, isLoading = false) }
     }
 
+    /**
+     * Previously anything that wasn't http/https returned `true` (= "handled")
+     * WITHOUT doing anything, so those links silently died. Now:
+     *  - http/https  -> WebView loads it
+     *  - intent://   -> parsed, fallback URL loaded if the app isn't installed
+     *  - mailto/tel/sms/market/etc -> handed to the system
+     *  - blob:/data:/about:/javascript: -> left to the WebView
+     */
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         val url = request.url.toString()
-        // Let the WebView handle standard web schemes; intent:// and other
-        // app-invoking schemes are left for the platform to resolve.
-        return if (url.startsWith("http://") || url.startsWith("https://")) {
-            false
-        } else {
+        val scheme = request.url.scheme?.lowercase() ?: return false
+
+        return when (scheme) {
+            "http", "https", "about", "blob", "data", "javascript", "file" -> false
+            "intent" -> handleIntentScheme(view, url)
+            else -> launchExternal(view, request.url)
+        }
+    }
+
+    private fun handleIntentScheme(view: WebView, url: String): Boolean {
+        return try {
+            val intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME).apply {
+                addCategory(Intent.CATEGORY_BROWSABLE)
+                component = null
+                selector = null
+            }
+            view.context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            true
+        } catch (e: ActivityNotFoundException) {
+            // App not installed: use the page's own fallback URL if it has one.
+            val fallback = runCatching {
+                Intent.parseUri(url, Intent.URI_INTENT_SCHEME).getStringExtra("browser_fallback_url")
+            }.getOrNull()
+            if (!fallback.isNullOrBlank()) view.loadUrl(fallback)
+            true
+        } catch (e: Exception) {
+            true
+        }
+    }
+
+    private fun launchExternal(view: WebView, uri: Uri): Boolean {
+        return try {
+            view.context.startActivity(
+                Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            true
+        } catch (e: Exception) {
             true
         }
     }

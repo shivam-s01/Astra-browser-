@@ -1,9 +1,15 @@
 package com.astra.browser
 
+import android.Manifest
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
@@ -30,10 +36,31 @@ import javax.inject.Inject
 class MainActivity : ComponentActivity() {
 
     @Inject lateinit var settingsStore: SettingsStore
+    @Inject lateinit var tabManager: com.astra.browser.core.tabs.TabManager
+    @Inject lateinit var mediaBridge: com.astra.browser.core.media.MediaPlaybackBridge
+
+    @Volatile private var backgroundPlaybackEnabled = false
+
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Track the setting in a plain field so onStop can read it instantly
+        // (no suspend call while the app is being backgrounded).
+        lifecycleScope.launch {
+            settingsStore.backgroundPlayback.collect { backgroundPlaybackEnabled = it }
+        }
+
+        // Android 13+ requires this at runtime or DownloadManager's
+        // completion/progress notification is silently suppressed -- a
+        // download can succeed in the background with no visible sign it
+        // happened at all, which reads as "downloads don't work".
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
 
         // --- Temporary crash-viewer (debugging aid) ---
         // If AstraApplication's crash logger wrote a crash file on the
@@ -65,6 +92,23 @@ class MainActivity : ComponentActivity() {
                 AstraApp()
             }
         }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Keep media alive only if the user opted in AND something is playing.
+        val keepAlive = backgroundPlaybackEnabled && mediaBridge.isAnyTabPlaying.value
+        tabManager.onAppBackgrounded(keepMediaAlive = keepAlive)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        tabManager.onAppForegrounded()
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        tabManager.trimBackgroundTabs(level)
     }
 }
 

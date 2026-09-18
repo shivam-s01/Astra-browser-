@@ -11,11 +11,20 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.location" android:required="false" />
+
+    <queries>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="https" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="http" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="mailto" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="tel" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="market" /></intent>
+    </queries>
 
     <application
         android:name=".AstraApplication"
@@ -26,7 +35,6 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Astra"
         android:hardwareAccelerated="true"
-        android:largeHeap="true"
         android:networkSecurityConfig="@xml/network_security_config"
         tools:targetApi="35"
         xmlns:tools="http://schemas.android.com/tools">
@@ -35,7 +43,7 @@
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
-            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode|density|fontScale"
             android:theme="@style/Theme.Astra">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

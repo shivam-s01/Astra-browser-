@@ -9,48 +9,69 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.astra.browser.MainActivity
 import com.astra.browser.R
 
 /**
- * Keeps Astra's process (and therefore its live WebViews) alive while a page
- * is playing audio/video and the app goes to the background — the same
- * mechanism music/video apps use. Android will otherwise suspend/kill a
- * backgrounded app's WebView, which stops playback.
+ * Keeps Astra's process (and its live WebViews) alive while a page plays
+ * audio/video and the app is in the background.
  *
- * This is opt-in: only started while BrowserViewModel detects media is
- * actually playing (see MediaPlaybackTracker), and only if the user has
- * "Background playback" enabled in Settings. It is stopped the moment
- * playback ends or the setting is turned off, so it never lingers as a
- * silent battery drain.
+ * Only runs while media is actually playing AND the user has Background
+ * playback enabled. A partial wake lock is held only for that window so the
+ * CPU keeps decoding audio with the screen off; it is released the moment
+ * the service stops, so it never lingers as a battery drain.
  */
 class BackgroundPlaybackService : Service() {
+
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP) {
+            // "Stop" pressed on the notification: tell the app to pause, then quit.
+            MediaPlaybackBridge.requestPauseAll()
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         val title = intent?.getStringExtra(EXTRA_TITLE) ?: "Playing in Astra"
-        startForeground(NOTIFICATION_ID, buildNotification(title), foregroundServiceType())
-        return START_STICKY
+        val notification = buildNotification(title)
+
+        // startForeground MUST be called quickly after startForegroundService
+        // or Android 12+ kills the app with ForegroundServiceDidNotStartInTime.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+
+        acquireWakeLock()
+        return START_NOT_STICKY
     }
 
-    private fun foregroundServiceType(): Int =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-        } else 0
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Astra:BackgroundPlayback").apply {
+            setReferenceCounted(false)
+            // Safety net: auto-release after 6h even if something goes wrong.
+            acquire(6 * 60 * 60 * 1000L)
+        }
+    }
 
     private fun buildNotification(title: String): Notification {
         ensureChannel()
 
-        val openAppIntent = PendingIntent.getActivity(
+        val openApp = PendingIntent.getActivity(
             this, 0,
-            Intent(this, MainActivity::class.java),
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-
-        val stopIntent = PendingIntent.getService(
-            this, 0,
+        val stop = PendingIntent.getService(
+            this, 1,
             Intent(this, BackgroundPlaybackService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
@@ -59,14 +80,19 @@ class BackgroundPlaybackService : Service() {
             .setContentTitle(title)
             .setContentText("Playing in the background")
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentIntent(openAppIntent)
+            .setContentIntent(openApp)
             .setOngoing(true)
-            .addAction(0, "Stop", stopIntent)
+            .setSilent(true)
+            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .addAction(0, "Stop", stop)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }
 
     override fun onDestroy() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
         super.onDestroy()
     }
 
