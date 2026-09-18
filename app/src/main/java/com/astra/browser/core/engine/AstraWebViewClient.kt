@@ -89,7 +89,20 @@ class AstraWebViewClient(
         view: WebView,
         request: WebResourceRequest
     ): WebResourceResponse? {
-        val pageOrigin = contentBlocker.originOf(view.url ?: "")
+        // shouldInterceptRequest is called by Chromium on a background
+        // thread (not the main/UI thread). Calling ANY WebView method
+        // (view.getUrl(), view.getTitle(), etc.) from here throws --
+        // WebView enforces that all its methods run on the thread that
+        // created it. This was the actual crash: `view.url` below used to
+        // call the real WebView.getUrl() getter from that background
+        // thread on every single request the page made (i.e. constantly),
+        // which is why it crashed on essentially any navigation/search.
+        //
+        // Fix: read the page's current URL from TabManager's state
+        // instead -- it's a plain in-memory value backed by a StateFlow,
+        // safe to read from any thread, no WebView call involved.
+        val pageUrl = tabManager.tabs.value.find { it.id == tabId }?.url ?: ""
+        val pageOrigin = contentBlocker.originOf(pageUrl)
         contentBlocker.intercept(tabId, pageOrigin, request)?.let { return it }
         return super.shouldInterceptRequest(view, request)
     }
