@@ -37,7 +37,6 @@ class MainActivity : ComponentActivity() {
 
     @Inject lateinit var settingsStore: SettingsStore
     @Inject lateinit var tabManager: com.astra.browser.core.tabs.TabManager
-    @Inject lateinit var mediaBridge: com.astra.browser.core.media.MediaPlaybackBridge
 
     @Volatile private var backgroundPlaybackEnabled = false
 
@@ -94,51 +93,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onPause() {
-        super.onPause()
-        // IMPORTANT: onPause() fires for things that DON'T actually leave
-        // the app invisible -- a permission dialog, a share sheet, split-
-        // screen losing focus. Freezing the WebView here would visibly
-        // stop video the user can still see on screen. So onPause() only
-        // ever CHECKS playback state (while the WebView is still guaranteed
-        // responsive); onStop() is what actually applies the freeze/keep
-        // decision, once we know the app is genuinely going to background.
-        if (backgroundPlaybackEnabled) {
-            tabManager.refreshPlaybackSnapshot()
-        }
-    }
-
     override fun onStop() {
         super.onStop()
-        // Real fix for "song stops the instant I leave the app", without
-        // keeping every WebView alive 24/7 (that would drain battery/heat on
-        // low-end devices even when nothing is playing -- exactly what we
-        // don't want).
-        //
-        // The naive "keepAlive = enabled && isAnyTabPlaying.value" read has
-        // TWO race windows, not one:
-        //  1. Timing: the JS 'play' event that flips isAnyTabPlaying to true
-        //     is dispatched async from the WebView's own thread, so it can
-        //     still read false for a moment even though media IS playing.
-        //  2. Missed event: on a page that was still loading/attaching its
-        //     listeners, the flag may never have been set at all yet.
-        // Freezing the WebView in either case kills playback for good --
-        // Chromium doesn't resume decode once paused mid-stream.
-        //
-        // Fix: if background playback is OFF, always freeze (cheap, correct,
-        // matches user intent -- also the common case, since the setting
-        // defaults off). If it's ON, confirmPlaybackAndFreeze() uses the
-        // snapshot refreshPlaybackSnapshot() already started in onPause() if
-        // it landed in time, or -- since that's filled in asynchronously via
-        // WebView JS callbacks and onStop() can in rare cases follow
-        // onPause() fast enough that it hasn't landed yet -- falls back to
-        // querying fresh itself. Either way it's ground truth, not the
-        // possibly-stale/racy cached isAnyTabPlaying flag.
-        if (!backgroundPlaybackEnabled) {
-            tabManager.onAppBackgrounded(keepMediaAlive = false)
-            return
-        }
-        tabManager.confirmPlaybackAndFreeze()
+        // Deliberately simple: no "is something actually playing" check
+        // here. That was tried (query every WebView's <video>/<audio> state
+        // via async evaluateJavascript before deciding whether to freeze)
+        // and removed -- see the long comment on TabManager.onAppBackgrounded
+        // for why it cannot be made reliable. onStop() is synchronous and
+        // the OS does not wait for an async JS callback to resolve before
+        // it's free to suspend the process, so any version of "ask first,
+        // then freeze" has a real window where it guesses wrong and kills
+        // playback that was genuinely running -- which is the exact bug
+        // this was supposed to fix.
+        tabManager.onAppBackgrounded(keepMediaAlive = backgroundPlaybackEnabled)
     }
 
     override fun onStart() {

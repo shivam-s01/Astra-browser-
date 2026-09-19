@@ -92,159 +92,37 @@ class TabManager @Inject constructor(
         wv.post { block(wv) }
     }
 
-    // Set by refreshPlaybackSnapshot() once its query resolves; read (and
-    // cleared) by confirmPlaybackAndFreeze(). @Volatile: written from a
-    // main-thread JS callback, read from onStop() -- same thread in
-    // practice, but this is free insurance against that assumption
-    // changing.
-    @Volatile private var lastPlaybackSnapshot: Map<String, Boolean>? = null
-
-    // Bumped on every refreshPlaybackSnapshot()/confirmPlaybackAndFreeze()
-    // call so a query's async result can tell whether it's still the
-    // current one. Without this, a slow onPause() query landing AFTER
-    // onStop() already consumed (and cleared) lastPlaybackSnapshot would
-    // silently write a stale answer that sits there until the NEXT
-    // background cycle reads it -- i.e. this app-open's playback state
-    // leaking into next time the app backgrounds.
-    private val snapshotGeneration = java.util.concurrent.atomic.AtomicInteger(0)
-
     /**
-     * Queries every WebView's own JS for genuine <video>/<audio> playback
-     * state and caches the result for confirmPlaybackAndFreeze() to consume.
-     * Called from onPause() -- while the Activity and its WebViews are still
-     * fully live and on-screen -- so evaluateJavascript is guaranteed to get
-     * a timely answer, unlike querying fresh from onStop() where some OEM
-     * skins may already be throttling the WebView by the time that callback
-     * runs.
+     * App went to the background. Freeze every tab (saves CPU/heat), unless
+     * [keepMediaAlive] is true, in which case ALL WebViews stay resumed so
+     * whichever one is actually playing audio keeps playing.
      *
-     * Does NOT touch WebView lifecycle (onPause/onResume/pauseTimers) --
-     * onPause() can fire for things that don't actually hide the app (a
-     * permission dialog, split-screen losing focus), so freezing anything
-     * here would visibly stop video the user can still see.
-     */
-    fun refreshPlaybackSnapshot() {
-        lastPlaybackSnapshot = null
-        val myGen = snapshotGeneration.incrementAndGet()
-        queryPlaybackState { result ->
-            if (snapshotGeneration.get() == myGen) lastPlaybackSnapshot = result
-            // else: superseded (confirmPlaybackAndFreeze already consumed
-            // and moved on, or another refresh started) -- drop it.
-        }
-    }
-
-    /**
-     * Called from onStop(), once the app is confirmed to actually be going
-     * to the background: tabs confirmed genuinely playing stay running
-     * (audio survives backgrounding), everything else freezes to save
-     * CPU/heat.
+     * This is deliberately simple and NEVER tries to first ask JS "is
+     * something actually playing right now" before deciding whether to
+     * freeze. That approach (tried and removed) queries every WebView via
+     * evaluateJavascript, which is asynchronous, then waits up to 400ms for
+     * an answer before onStop() can finish -- but onStop() is a synchronous
+     * lifecycle callback the OS does not wait around for, and the moment it
+     * returns, Android is free to fully suspend the process. In practice
+     * that query routinely lost the race (or hit its own timeout), silently
+     * fell back to "nothing is playing", and froze the WebView -- which is
+     * exactly the "song stops the instant I background the app" bug. There
+     * is no async-query version of this that can be made reliable, because
+     * the deadline (onStop returning) is not something we control.
      *
-     * Prefers the snapshot onPause() already queried (queried while
-     * everything was still guaranteed responsive) if it finished in time;
-     * onStop() can in rare cases follow onPause() fast enough that the
-     * async JS callbacks haven't all landed yet, so as a fallback this
-     * kicks off (and waits on) a fresh query of its own rather than
-     * guessing. Idempotent either way.
-     */
-    fun confirmPlaybackAndFreeze() {
-        val cached = lastPlaybackSnapshot
-        lastPlaybackSnapshot = null
-        snapshotGeneration.incrementAndGet() // invalidate any in-flight refreshPlaybackSnapshot query
-        if (cached != null) {
-            applyFreezeDecision(webViews.toMap(), cached)
-            return
-        }
-        queryPlaybackState { results -> applyFreezeDecision(webViews.toMap(), results) }
-    }
-
-    /**
-     * Ground-truth "is anything genuinely playing" query, shared by
-     * onPause()'s early check and onStop()'s fallback. All results are
-     * collected before [onResult] is invoked; a callback that never fires
-     * (OEM quirk, WebView torn down mid-call) is covered by a 400ms
-     * timeout -- generous for a same-process JS eval that normally
-     * completes in single-digit ms -- so a stuck tab can't block the
-     * decision forever.
-     */
-    private fun queryPlaybackState(onResult: (Map<String, Boolean>) -> Unit) {
-        if (webViews.isEmpty()) {
-            onResult(emptyMap())
-            return
-        }
-        val pending = webViews.toMap() // snapshot: safe if tabs open/close mid-flight
-        val results = ConcurrentHashMap<String, Boolean>()
-        val decided = java.util.concurrent.atomic.AtomicBoolean(false)
-
-        fun finishOnce() {
-            if (decided.compareAndSet(false, true)) onResult(results.toMap())
-        }
-
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ finishOnce() }, 400)
-
-        pending.forEach { (id, wv) ->
-            runCatching {
-                wv.evaluateJavascript(
-                    """
-                    (function(){
-                        var playing = false;
-                        document.querySelectorAll('video, audio').forEach(function(e){
-                            if (!e.paused && !e.ended && e.readyState > 2) playing = true;
-                        });
-                        return playing;
-                    })();
-                    """.trimIndent()
-                ) { result ->
-                    results[id] = (result == "true")
-                    if (results.size == pending.size) finishOnce()
-                }
-            }.onFailure {
-                // WebView was destroyed between snapshot and this call; count
-                // it as answered (not playing) so the others aren't blocked
-                // waiting on a response that will never arrive.
-                results[id] = false
-                if (results.size == pending.size) finishOnce()
-            }
-        }
-    }
-
-    /**
-     * Applies playback results to WebViews: tabs confirmed genuinely
-     * playing stay running, everything else freezes. A tab opened after the
-     * query was taken simply has no entry in [results], which reads as "not
-     * confirmed playing" below -- the safe default (freeze) rather than
-     * guessing.
-     *
-     * All results are applied before the single pauseTimers()/resumeTimers()
-     * call at the end. Those two are process-wide statics (see
-     * onAppBackgrounded), so the combined outcome must be known before
-     * either is called -- calling per-tab as results trickled in earlier
-     * was the actual bug this function replaced.
-     */
-    private fun applyFreezeDecision(webViewsSnapshot: Map<String, WebView>, results: Map<String, Boolean>) {
-        val anyPlaying = results.values.any { it }
-        webViewsSnapshot.forEach { (id, wv) ->
-            // A tab can close (and destroy() its WebView) in the small
-            // window between snapshotting and this call. Calling lifecycle
-            // methods on an already-destroyed WebView isn't guaranteed
-            // safe, so guard it.
-            runCatching {
-                if (results[id] == true) wv.onResume() else wv.onPause()
-            }
-        }
-        val anyLive = webViewsSnapshot.values.firstOrNull()
-        if (anyLive != null) {
-            runCatching { if (anyPlaying) anyLive.resumeTimers() else anyLive.pauseTimers() }
-        }
-    }
-
-    /**
-     * App went to the background. Freeze every INACTIVE tab (saves CPU/heat),
-     * but if [keepMediaAlive] is true leave the WebViews running so audio
-     * keeps playing. Chromium otherwise suspends media the moment its host
-     * Activity stops -- this is what made "background play" never work.
+     * The only correct fix is to never gate the freeze decision on a query
+     * at all: if the user has background playback on, every WebView simply
+     * stays resumed while backgrounded, full stop. A WebView with nothing
+     * playing costs a small, fixed amount of idle CPU (it's not rendering,
+     * screen is off) -- nowhere near what a query-and-maybe-freeze race
+     * costs when it guesses wrong and kills real playback.
      */
     fun onAppBackgrounded(keepMediaAlive: Boolean) {
         if (keepMediaAlive) {
-            webViews.values.forEach { it.onResume(); it.resumeTimers() }
+            webViews.values.forEach { wv ->
+                wv.onResume()
+                wv.resumeTimers()
+            }
         } else {
             webViews.values.forEach { it.onPause() }
             // WebView.pauseTimers() is a PROCESS-WIDE static call, not
@@ -544,7 +422,22 @@ class TabManager @Inject constructor(
                 // (setRenderPriority is deprecated & a no-op on modern WebView;
                 // removed. Forcing HIGH only encouraged extra CPU work.)
                 offscreenPreRaster = false // don't rasterize off-screen content -> less GPU/heat
-                safeBrowsingEnabled = true
+                // Google Safe Browsing shows a full, non-dismissible-by-
+                // default red interstitial and can outright refuse to load
+                // a page the instant it's flagged -- and it flags download
+                // portals / streaming / anime-dub sites constantly, because
+                // their AD NETWORKS occasionally serve malicious payloads
+                // even when the site's own content is completely fine. From
+                // the user's side this looks exactly like "heavy sites just
+                // won't open" with no visible reason why. Astra's own
+                // ad/tracker blocking (ContentBlocker) is the actual
+                // protection layer here -- it stops the malicious ad
+                // requests themselves rather than refusing the whole page
+                // because of them. Real Chromium-based browsers built for
+                // this kind of site (Brave included) ship their own
+                // phishing/malware protection instead of Google's for
+                // exactly this reason.
+                safeBrowsingEnabled = false
             }
 
             // Default layer type (hardware via the Activity's flag). Forcing

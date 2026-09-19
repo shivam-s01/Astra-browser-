@@ -119,10 +119,25 @@ class BackgroundPlaybackService : Service() {
     }
 
     private fun updateMetadata(title: String) {
+        // Fetching the actual page's video thumbnail would need scraping
+        // the site's DOM/og:image, which is unreliable across sites and not
+        // worth the complexity. Using Astra's own icon here at least means
+        // the quick-settings/lock-screen media card shows real art instead
+        // of a blank placeholder box.
+        val icon = runCatching {
+            android.graphics.BitmapFactory.decodeResource(resources, R.mipmap.ic_launcher)
+        }.getOrNull()
+
         mediaSession?.setMetadata(
             MediaMetadataCompat.Builder()
                 .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
                 .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, "Astra Browser")
+                .apply {
+                    if (icon != null) {
+                        putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, icon)
+                        putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, icon)
+                    }
+                }
                 .build()
         )
     }

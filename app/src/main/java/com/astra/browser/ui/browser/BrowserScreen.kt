@@ -47,6 +47,41 @@ fun BrowserScreen(
         viewModel.exitFullscreen()
     }
 
+    // Without this, Android's back button/gesture skipped the WebView
+    // entirely and went straight to finishing the Activity -- so pressing
+    // back while several pages deep into a site's own navigation history
+    // closed the whole app instead of stepping back through that history,
+    // exactly like every other real browser (Chrome, Brave) does it.
+    //
+    // Priority, evaluated in order every time back is pressed (Brave-style):
+    //   1. Fullscreen video open -> handled by the BackHandler above already
+    //      (Compose runs the innermost/first-declared enabled BackHandler).
+    //   2. Find-in-page bar open -> close it, don't touch navigation yet.
+    //   3. WebView has its own back history (canGoBack) -> step back a page
+    //      in THIS tab, same as tapping the toolbar's back arrow.
+    //   4. Tab has no more history AND it isn't the only/last tab -> close
+    //      this tab and fall back to whichever tab was active before it
+    //      (mirrors closing a tab in a real browser rather than exiting).
+    //   5. Nothing left to step back through -> let the system handle it
+    //      (backgrounds/exits the app normally). BackHandler is simply
+    //      disabled in that case so this falls through to default behavior.
+    val canStepBackInPage = activeTab?.canGoBack == true
+    BackHandler(enabled = fullscreenView == null && (showFindInPage || canStepBackInPage)) {
+        when {
+            showFindInPage -> showFindInPage = false
+            canStepBackInPage -> activeTab?.let { viewModel.tabManager.getWebView(it.id)?.goBack() }
+        }
+    }
+
+    // Case 4 above: no page history left, but more than one tab is open --
+    // close the current tab instead of exiting the app. Separate
+    // BackHandler so its `enabled` can react to tabs.size independently of
+    // the page-history one above (both are re-evaluated fresh on every
+    // back press by Compose, so ordering/overlap between them is safe).
+    BackHandler(enabled = fullscreenView == null && !showFindInPage && !canStepBackInPage && tabs.size > 1) {
+        activeTab?.let { viewModel.closeTab(it.id) }
+    }
+
     LaunchedEffect(activeTab?.url) {
         if (!isAddressBarFocused) addressBarText = activeTab?.url ?: ""
     }
