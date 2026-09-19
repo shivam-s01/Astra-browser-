@@ -3,42 +3,40 @@ package com.astra.browser
 import android.Manifest
 import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
-import androidx.lifecycle.lifecycleScope
-import kotlinx.coroutines.launch
 import androidx.activity.compose.setContent
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Text
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.astra.browser.data.store.SettingsStore
 import com.astra.browser.theme.AstraThemeId
 import com.astra.browser.theme.AstraTheme
 import com.astra.browser.ui.AstraApp
+import com.astra.browser.ui.browser.BrowserViewModel
 import dagger.hilt.android.AndroidEntryPoint
-import java.io.File
 import javax.inject.Inject
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
     @Inject lateinit var settingsStore: SettingsStore
-    @Inject lateinit var tabManager: com.astra.browser.core.tabs.TabManager
-
-    @Volatile private var backgroundPlaybackEnabled = false
 
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -46,12 +44,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-
-        // Track the setting in a plain field so onStop can read it instantly
-        // (no suspend call while the app is being backgrounded).
-        lifecycleScope.launch {
-            settingsStore.backgroundPlayback.collect { backgroundPlaybackEnabled = it }
-        }
 
         // Android 13+ requires this at runtime or DownloadManager's
         // completion/progress notification is silently suppressed -- a
@@ -61,95 +53,133 @@ class MainActivity : ComponentActivity() {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        // --- Temporary crash-viewer (debugging aid) ---
-        // If AstraApplication's crash logger wrote a crash file on the
-        // previous run, show it full-screen and selectable on next launch
-        // instead of the normal browser UI. This is needed because file
-        // manager access to internal app storage (filesDir) isn't
-        // straightforward without a rooted device or ADB. Once the
-        // underlying crash is diagnosed and fixed, this block (and the
-        // logger in AstraApplication) should be removed.
-        val crashFiles = filesDir.listFiles { f -> f.name.startsWith("astra_crash_") }
-            ?.sortedByDescending { it.lastModified() }
-        val latestCrash = crashFiles?.firstOrNull()
-
-        if (latestCrash != null) {
-            setContent {
-                CrashViewerScreen(crashFile = latestCrash, onDismiss = {
-                    crashFiles.forEach { it.delete() }
-                    recreate()
-                })
-            }
-            return
-        }
-
         setContent {
             val themeIdName by settingsStore.themeId.collectAsState(initial = "SYSTEM")
             val themeId = runCatching { AstraThemeId.valueOf(themeIdName) }.getOrDefault(AstraThemeId.SYSTEM)
 
-            val uiPrefs by com.astra.browser.ui.prefs.rememberUiPrefs(settingsStore)
-
             AstraTheme(themeId = themeId) {
-                androidx.compose.runtime.CompositionLocalProvider(
-                    com.astra.browser.ui.prefs.LocalUiPrefs provides uiPrefs
-                ) {
+                AppLockGate(activity = this) {
                     AstraApp()
+                    PrivateTabScreenGuard()
                 }
             }
         }
     }
-
-    override fun onStop() {
-        super.onStop()
-        // Deliberately simple: no "is something actually playing" check
-        // here. That was tried (query every WebView's <video>/<audio> state
-        // via async evaluateJavascript before deciding whether to freeze)
-        // and removed -- see the long comment on TabManager.onAppBackgrounded
-        // for why it cannot be made reliable. onStop() is synchronous and
-        // the OS does not wait for an async JS callback to resolve before
-        // it's free to suspend the process, so any version of "ask first,
-        // then freeze" has a real window where it guesses wrong and kills
-        // playback that was genuinely running -- which is the exact bug
-        // this was supposed to fix.
-        tabManager.onAppBackgrounded(keepMediaAlive = backgroundPlaybackEnabled)
-    }
-
-    override fun onStart() {
-        super.onStart()
-        tabManager.onAppForegrounded()
-    }
-
-    override fun onTrimMemory(level: Int) {
-        super.onTrimMemory(level)
-        tabManager.trimBackgroundTabs(level)
-    }
 }
 
+/**
+ * Applies FLAG_SECURE (blocks screenshots, and shows a blank thumbnail
+ * instead of page content in the Recents/app-switcher view) whenever the
+ * currently active tab is a private tab, and removes it otherwise. Without
+ * this, "private" browsing still leaks its content the moment the user
+ * takes a screenshot or opens the app switcher -- the OS keeps a full
+ * bitmap of the last frame regardless of any in-page privacy setting.
+ */
 @androidx.compose.runtime.Composable
-private fun CrashViewerScreen(crashFile: File, onDismiss: () -> Unit) {
-    val text = runCatching { crashFile.readText() }.getOrElse { "Could not read crash file: ${it.message}" }
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-            .padding(16.dp)
-    ) {
-        androidx.compose.foundation.layout.Column(
-            modifier = Modifier.fillMaxSize()
-        ) {
-            androidx.compose.material3.Button(onClick = onDismiss) {
-                Text("Continue to browser (dismiss this crash log)")
-            }
-            androidx.compose.foundation.layout.Spacer(modifier = Modifier.padding(8.dp))
-            SelectionContainer {
-                Text(
-                    text = "Last crash (long-press to select & copy):\n\n$text",
-                    color = Color(0xFF00FF66),
-                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                    fontSize = androidx.compose.ui.unit.TextUnit(11f, androidx.compose.ui.unit.TextUnitType.Sp),
-                    modifier = Modifier.verticalScroll(rememberScrollState())
-                )
-            }
+private fun PrivateTabScreenGuard(viewModel: BrowserViewModel = androidx.hilt.navigation.compose.hiltViewModel()) {
+    val activity = androidx.compose.ui.platform.LocalContext.current as? ComponentActivity ?: return
+    val tabs by viewModel.tabs.collectAsState()
+    val activeTabId by viewModel.activeTabId.collectAsState()
+    val isActivePrivate = tabs.find { it.id == activeTabId }?.isPrivate == true
+
+    LaunchedEffect(isActivePrivate) {
+        if (isActivePrivate) {
+            activity.window.setFlags(
+                WindowManager.LayoutParams.FLAG_SECURE,
+                WindowManager.LayoutParams.FLAG_SECURE
+            )
+        } else {
+            activity.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
     }
 }
+
+/**
+ * When "App lock" is enabled in Settings, requires a successful biometric
+ * (fingerprint/face) or device-credential (PIN/pattern) check before
+ * showing the browser content, on cold start and whenever the app returns
+ * to the foreground. If the device has no biometric/PIN enrolled at all,
+ * the lock is skipped -- there's no enrolled credential to check against,
+ * so treating that as a permanent lock-out would strand the user.
+ */
+@androidx.compose.runtime.Composable
+private fun AppLockGate(
+    activity: ComponentActivity,
+    content: @androidx.compose.runtime.Composable () -> Unit
+) {
+    val settingsStore: SettingsStore = androidx.hilt.navigation.compose.hiltViewModel<AppLockViewModel>().settingsStore
+    val appLockEnabled by settingsStore.appLockEnabled.collectAsState(initial = false)
+    var isUnlocked by remember { mutableStateOf(!appLockEnabled) }
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+
+    // Re-lock whenever the app comes back to the foreground (not just on
+    // cold start), e.g. the user switches to another app to check
+    // something and comes back -- that's exactly the moment an app lock
+    // is supposed to guard.
+    DisposableEffect(lifecycleOwner, appLockEnabled) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_START && appLockEnabled) {
+                isUnlocked = false
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(appLockEnabled, isUnlocked) {
+        if (!appLockEnabled) {
+            isUnlocked = true
+            return@LaunchedEffect
+        }
+        if (isUnlocked) return@LaunchedEffect
+        val biometricManager = BiometricManager.from(activity)
+        val canAuthenticate = biometricManager.canAuthenticate(
+            BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        )
+        if (canAuthenticate != BiometricManager.BIOMETRIC_SUCCESS) {
+            // Nothing enrolled (no fingerprint/face/PIN) -- can't lock
+            // against a credential that doesn't exist. Let the user in
+            // rather than blocking them out of their own browser.
+            isUnlocked = true
+            return@LaunchedEffect
+        }
+
+        isUnlocked = false
+        val executor = ContextCompat.getMainExecutor(activity)
+        val prompt = BiometricPrompt(
+            activity,
+            executor,
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    isUnlocked = true
+                }
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    // Leave locked; the prompt UI itself already showed
+                    // the error / lets the user retry or cancel.
+                }
+            }
+        )
+        val promptInfo = BiometricPrompt.PromptInfo.Builder()
+            .setTitle("Unlock Astra")
+            .setSubtitle("Verify it's you to continue")
+            .setAllowedAuthenticators(
+                BiometricManager.Authenticators.BIOMETRIC_WEAK or BiometricManager.Authenticators.DEVICE_CREDENTIAL
+            )
+            .build()
+        prompt.authenticate(promptInfo)
+    }
+
+    if (isUnlocked) {
+        content()
+    } else {
+        Box(
+            modifier = Modifier.fillMaxSize().background(Color.Black),
+            contentAlignment = Alignment.Center
+        ) {
+            CircularProgressIndicator()
+        }
+    }
+}
+
+@dagger.hilt.android.lifecycle.HiltViewModel
+class AppLockViewModel @Inject constructor(val settingsStore: SettingsStore) : androidx.lifecycle.ViewModel()

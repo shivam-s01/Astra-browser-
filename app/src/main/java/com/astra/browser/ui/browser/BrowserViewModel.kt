@@ -63,40 +63,6 @@ class BrowserViewModel @Inject constructor(
         .map { name -> runCatching { SearchEngine.valueOf(name) }.getOrDefault(SearchEngine.GOOGLE) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, SearchEngine.GOOGLE)
 
-    @Volatile private var blockPopupsEnabled = true
-
-    // ---------------------------------------------------------------- Shield
-    /** Master switches, shown as toggles in the Shield popup. */
-    val adBlockingEnabled: StateFlow<Boolean> =
-        settingsStore.adBlocking.stateIn(viewModelScope, SharingStarted.Eagerly, true)
-    val trackingProtectionEnabled: StateFlow<Boolean> =
-        settingsStore.trackingProtection.stateIn(viewModelScope, SharingStarted.Eagerly, true)
-    val blockPopupsFlow: StateFlow<Boolean> =
-        settingsStore.blockPopups.stateIn(viewModelScope, SharingStarted.Eagerly, true)
-    val lifetimeBlocked: StateFlow<Int> =
-        settingsStore.totalTrackersBlocked.stateIn(viewModelScope, SharingStarted.Eagerly, 0)
-    /** Hosts where the user turned Shield OFF. */
-    val shieldOffSites: StateFlow<Set<String>> =
-        settingsStore.shieldOffSites.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
-    /** Live per-tab request stats (blocked ads / trackers / allowed). */
-    val shieldStats: StateFlow<Map<String, ContentBlocker.TabStats>> = contentBlocker.stats
-
-    fun setAdBlocking(enabled: Boolean) { viewModelScope.launch { settingsStore.setAdBlocking(enabled) } }
-    fun setTrackingProtection(enabled: Boolean) { viewModelScope.launch { settingsStore.setTrackingProtection(enabled) } }
-    fun setBlockPopups(enabled: Boolean) { viewModelScope.launch { settingsStore.setBlockPopups(enabled) } }
-
-    /** Turn Shield on/off for one site only, then reload so the change is visible immediately. */
-    fun setShieldForSite(tabId: String, host: String, enabled: Boolean) {
-        viewModelScope.launch {
-            // The persisted set is the single source of truth. The collector in
-            // init{} pushes it into the blocker; we also apply it right now so
-            // the reload below already sees the new rule (DataStore emits async).
-            if (enabled) contentBlocker.clearSiteOverride(host) else contentBlocker.setSiteOverride(host, false)
-            settingsStore.setShieldEnabledForSite(host, enabled)
-            tabManager.getWebView(tabId)?.reload()
-        }
-    }
-
     val customSearchUrl: StateFlow<String> =
         settingsStore.customSearchUrl.stateIn(viewModelScope, SharingStarted.Eagerly, "")
 
@@ -112,17 +78,6 @@ class BrowserViewModel @Inject constructor(
                 tabId = tabId,
                 tabManager = tabManager,
                 permissionManager = permissionManager,
-                onNewWindowRequested = { url, _ ->
-                    // Open target=_blank / window.open in a real new tab.
-                    viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
-                        tabManager.createTab(context, url = url)
-                    }
-                },
-                popupsBlocked = { blockPopupsEnabled },
-                isAdPopupTarget = { url ->
-                    val pageUrl = tabManager.urlForTab(tabId) ?: ""
-                    contentBlocker.blockPopupTarget(tabId, contentBlocker.originOf(pageUrl), url)
-                },
                 onFullscreenChange = { view, callback ->
                     if (view == null) {
                         // Site itself dismissed fullscreen (e.g. back press
@@ -143,31 +98,9 @@ class BrowserViewModel @Inject constructor(
             // DownloadManager-backed flow.
             webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
                 viewModelScope.launch {
-                    try {
-                        downloadManager.startDownload(url, userAgent, contentDisposition, mimeType)
-                        android.widget.Toast.makeText(context, "Download started", android.widget.Toast.LENGTH_SHORT).show()
-                    } catch (e: Exception) {
-                        android.widget.Toast.makeText(context, "Download failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
-                    }
+                    downloadManager.startDownload(url, userAgent, contentDisposition, mimeType)
                 }
             }
-        }
-
-        viewModelScope.launch {
-            settingsStore.blockPopups.collect { blockPopupsEnabled = it }
-        }
-
-        viewModelScope.launch {
-            settingsStore.desktopSites.collect { desktopSitesCache = it }
-        }
-
-        // Persisted "Shield OFF for this site" list -> blocker (survives restarts).
-        viewModelScope.launch {
-            settingsStore.shieldOffSites.collect { contentBlocker.loadDisabledHosts(it) }
-        }
-        // Lifetime counter: the blocker reports batches of new blocks, we persist them.
-        contentBlocker.onBlockedDelta = { delta ->
-            viewModelScope.launch { settingsStore.incrementTrackersBlocked(delta) }
         }
 
         viewModelScope.launch {
@@ -181,8 +114,16 @@ class BrowserViewModel @Inject constructor(
             tabManager.createTab(context)
         }
 
+        val activeTabTitle: StateFlow<String> = tabs
+            .combine(activeTabId) { list, id -> list.find { it.id == id }?.title ?: "Playing in Astra" }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, "Playing in Astra")
 
-        backgroundPlaybackController.start()
+        backgroundPlaybackController.start(
+            scope = viewModelScope,
+            backgroundPlaybackEnabled = settingsStore.backgroundPlayback
+                .stateIn(viewModelScope, SharingStarted.Eagerly, false),
+            activeTabTitle = activeTabTitle
+        )
     }
 
     fun newTab(isPrivate: Boolean = false) {
@@ -192,7 +133,6 @@ class BrowserViewModel @Inject constructor(
     fun closeTab(tabId: String) {
         val tab = tabManager.tabs.value.find { it.id == tabId }
         tabManager.closeTab(tabId)
-        contentBlocker.clearTab(tabId)
         if (tab != null && !tab.isPrivate && tab.url.isNotBlank()) {
             viewModelScope.launch { closedTabRepository.record(tab.url, tab.title) }
         }
@@ -231,7 +171,6 @@ class BrowserViewModel @Inject constructor(
         tabManager.updateTab(tabId) {
             it.copy(url = resolved, isBlankTab = false, isLoading = true, loadProgress = 0)
         }
-        applyRememberedDesktop(tabId, resolved)
         tabManager.getWebView(tabId)?.loadUrl(resolved)
     }
 
@@ -245,17 +184,6 @@ class BrowserViewModel @Inject constructor(
 
     fun onPageVisited(tabId: String, url: String) {
         val tab = tabManager.tabs.value.find { it.id == tabId } ?: return
-        // Link clicks / redirects / target=_blank tabs never go through navigate(),
-        // so re-check the remembered per-site desktop choice on every page load.
-        if (!tab.isPrivate) {
-            val host = runCatching { java.net.URI(url).host?.lowercase() }.getOrNull()
-            if (host != null) {
-                val wanted = host in desktopSitesCache
-                if (wanted != tab.desktopSiteEnabled) {
-                    tabManager.updateTab(tabId) { it.copy(desktopSiteEnabled = wanted) }
-                }
-            }
-        }
         if (tab.isPrivate) return
         viewModelScope.launch {
             historyRepository.record(url, tab.title.ifBlank { url })
@@ -277,80 +205,7 @@ class BrowserViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Show the Astra start page again in this tab (Brave's Home button).
-     * Stops any in-flight load FIRST (otherwise onPageStarted would flip
-     * isBlankTab back to false and bounce the user straight back to the
-     * page), then flips only isBlankTab. The tab's url and the WebView's own
-     * history are deliberately left alone so Back/Forward keep working.
-     */
-    fun goHome(tabId: String) {
-        tabManager.getWebView(tabId)?.stopLoading()
-        tabManager.updateTab(tabId) {
-            it.copy(isBlankTab = true, isLoading = false, loadProgress = 0)
-        }
-    }
-
-    /**
-     * Back / Forward / Reload from anywhere (system back, menu quick-actions).
-     * If the user is on the Astra start page (isBlankTab) while the tab still
-     * has a real page underneath, these must FIRST bring that page back on
-     * screen -- otherwise the WebView navigates invisibly and the user just
-     * keeps seeing the start page, i.e. "Back does nothing".
-     */
-    private fun showPageIfHome(tabId: String) {
-        val tab = tabManager.tabs.value.find { it.id == tabId } ?: return
-        if (tab.isBlankTab && tab.url.isNotBlank()) {
-            tabManager.updateTab(tabId) { it.copy(isBlankTab = false) }
-        }
-    }
-
-    fun goBack(tabId: String) {
-        val tab = tabManager.tabs.value.find { it.id == tabId } ?: return
-        // On the start page with a page hidden underneath: first Back just
-        // reveals that page (like Brave), it does not skip past it.
-        if (tab.isBlankTab && tab.url.isNotBlank()) {
-            showPageIfHome(tabId)
-        } else {
-            tabManager.getWebView(tabId)?.goBack()
-        }
-    }
-
-    fun goForward(tabId: String) {
-        showPageIfHome(tabId)
-        tabManager.getWebView(tabId)?.goForward()
-    }
-
-    fun reload(tabId: String) {
-        showPageIfHome(tabId)
-        tabManager.getWebView(tabId)?.reload()
-    }
-
-    /**
-     * Desktop site is remembered PER SITE (like Chrome/Brave): toggle it once
-     * for a host and every tab that opens that host later uses the desktop
-     * version automatically, until it is switched back.
-     */
     fun toggleDesktopSite(tabId: String) {
-        val tab = tabManager.tabs.value.find { it.id == tabId } ?: return
-        val now = !tab.desktopSiteEnabled
-        tabManager.updateTab(tabId) { it.copy(desktopSiteEnabled = now) }
-        val host = runCatching { java.net.URI(tab.url).host?.lowercase() }.getOrNull()
-        if (host != null && !tab.isPrivate) {
-            viewModelScope.launch { settingsStore.setDesktopForSite(host, now) }
-        }
+        tabManager.updateTab(tabId) { it.copy(desktopSiteEnabled = !it.desktopSiteEnabled) }
     }
-
-    /** Applies the remembered per-site desktop choice when a tab lands on a host. */
-    private fun applyRememberedDesktop(tabId: String, url: String) {
-        val host = runCatching { java.net.URI(url).host?.lowercase() }.getOrNull() ?: return
-        val tab = tabManager.tabs.value.find { it.id == tabId } ?: return
-        if (tab.isPrivate) return
-        val wanted = host in desktopSitesCache
-        if (wanted != tab.desktopSiteEnabled) {
-            tabManager.updateTab(tabId) { it.copy(desktopSiteEnabled = wanted) }
-        }
-    }
-
-    @Volatile private var desktopSitesCache: Set<String> = emptySet()
 }

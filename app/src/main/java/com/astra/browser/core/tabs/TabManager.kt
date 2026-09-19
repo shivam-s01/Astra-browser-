@@ -2,13 +2,11 @@ package com.astra.browser.core.tabs
 
 import android.content.Context
 import android.webkit.WebView
-import com.astra.browser.core.engine.PageScripts
 import com.astra.browser.core.media.MediaPlaybackBridge
 import com.astra.browser.domain.model.Tab
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -36,193 +34,20 @@ class TabManager @Inject constructor(
     /** Set once by the browser UI layer; attaches clients to every new WebView. */
     var webViewConfigurer: ((tabId: String, webView: WebView) -> Unit)? = null
 
-    init {
-        // Notification/lock-screen "Pause" -> pause every <video>/<audio> on every tab.
-        mediaPlaybackBridge.pauseAllHandler = {
-            webViews.values.forEach { wv ->
-                wv.post {
-                    wv.evaluateJavascript(
-                        "document.querySelectorAll('video,audio').forEach(function(e){try{e.pause()}catch(x){}})",
-                        null
-                    )
-                }
-            }
-        }
-        // Notification/lock-screen "Play" -> resume the currently-playing (or
-        // most recently playing) element on the active tab. We only resume
-        // the active tab so we don't start audio on a background tab the
-        // user never actually asked to play.
-        mediaPlaybackBridge.playAllHandler = {
-            withActiveWebView { wv ->
-                wv.evaluateJavascript(
-                    """
-                    (function(){
-                        var els = document.querySelectorAll('video,audio');
-                        var target = null;
-                        els.forEach(function(e){ if (!target && e.currentTime > 0) target = e; });
-                        if (!target && els.length) target = els[0];
-                        if (target) { try { target.play(); } catch(x) {} }
-                    })();
-                    """.trimIndent(),
-                    null
-                )
-            }
-        }
-        // Lock-screen skip-forward/back -> seek the active tab's playing element.
-        mediaPlaybackBridge.seekHandler = { seconds ->
-            withActiveWebView { wv ->
-                wv.evaluateJavascript(
-                    """
-                    (function(){
-                        var els = document.querySelectorAll('video,audio');
-                        var target = null;
-                        els.forEach(function(e){ if (!target && !e.paused) target = e; });
-                        if (!target && els.length) target = els[0];
-                        if (target) { try { target.currentTime = Math.max(0, target.currentTime + ($seconds)); } catch(x) {} }
-                    })();
-                    """.trimIndent(),
-                    null
-                )
-            }
-        }
-    }
-
-    /** Runs [block] on the active tab's WebView, posted onto its own thread. */
-    private fun withActiveWebView(block: (WebView) -> Unit) {
-        val wv = _activeTabId.value?.let { webViews[it] } ?: return
-        wv.post { block(wv) }
-    }
-
-    /**
-     * App went to the background.
-     *
-     * keepMediaAlive == false: freeze every tab + process-wide timers (coolest).
-     *
-     * keepMediaAlive == true: keep ONLY the tab(s) the JS media-watcher already
-     * reported as playing running; freeze the rest. The playing set is kept
-     * up to date synchronously by MediaPlaybackBridge (play/pause events push
-     * into it), so this is a plain in-memory lookup -- no async evaluateJavascript
-     * race like the earlier "ask the page first" attempt had. If nothing is
-     * reported playing yet (e.g. video is still buffering), we keep the ACTIVE
-     * tab alive as a safe default, so audio never gets cut by a guess.
-     *
-     * Result: background music still plays, but the 4-5 other heavy tabs stop
-     * burning CPU -- this is where most of the heat used to come from.
-     */
-    fun onAppBackgrounded(keepMediaAlive: Boolean) {
-        if (!keepMediaAlive) {
-            webViews.values.forEach { runCatching { it.onPause() } }
-            webViews.values.firstOrNull()?.pauseTimers()
-            return
-        }
-        val active = _activeTabId.value
-        val anyPlaying = webViews.keys.any { mediaPlaybackBridge.isPlaying(it) }
-        webViews.forEach { (id, wv) ->
-            val keep = if (anyPlaying) mediaPlaybackBridge.isPlaying(id) else id == active
-            if (keep) {
-                runCatching { wv.onResume() }
-                // Tell the page we are "visible" so the site does not self-pause.
-                pushFlags(wv)
-            } else {
-                runCatching { wv.onPause() }
-            }
-        }
-        // Timers are process-wide: they must run while anything is kept alive.
-        webViews.values.firstOrNull()?.resumeTimers()
-    }
-
-    fun onAppForegrounded() {
-        webViews.values.forEach { it.onResume() }
-        webViews.values.firstOrNull()?.resumeTimers()
-    }
-
-    /** Frees memory of tabs not looked at for a while (lightweight / cool). */
-    fun trimBackgroundTabs(level: Int) {
-        val active = _activeTabId.value
-        webViews.forEach { (id, wv) ->
-            if (id != active) {
-                wv.clearCache(false)
-                if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_MODERATE) wv.freeMemory()
-            }
-        }
-    }
-
     val activeTab: Tab?
         get() = _tabs.value.find { it.id == _activeTabId.value }
 
     fun getWebView(tabId: String): WebView? = webViews[tabId]
 
-    /**
-     * Pauses whatever tab is about to stop being the active one, unless
-     * it's confirmed still playing audio/video. Shared by createTab() and
-     * switchTo() -- opening a new tab is exactly as much of an "away from
-     * this tab" event as switching to an existing one, and was previously
-     * left out, so opening tabs while a heavy site sat in the background
-     * still burned CPU on it.
-     */
-    private fun pauseIfNoLongerActive(tabId: String?) {
-        if (tabId == null) return
-        if (!mediaPlaybackBridge.isPlaying(tabId)) {
-            webViews[tabId]?.let { runCatching { it.onPause() } }
-        }
-    }
-
-    /**
-     * Called by AstraWebViewClient.onRenderProcessGone when a tab's renderer
-     * process crashes -- most likely on a heavy/ad-dense site overloading a
-     * low-end device's renderer. Per WebView's own contract, a WebView whose
-     * render process died is permanently unusable: calling destroy() (or
-     * almost anything else) on it can itself throw/crash, so the dead
-     * instance is only detached from its parent view and dropped, never
-     * interacted with further. A brand-new WebView is created in its place
-     * under the SAME tab ID, so the tab survives (title, position in the
-     * tab list, etc.) even though the underlying renderer had to restart --
-     * exactly what real browsers do here instead of taking the whole app
-     * down.
-     */
-    fun replaceCrashedWebView(tabId: String, deadWebView: WebView) {
-        val tab = _tabs.value.find { it.id == tabId } ?: return
-        val wasActive = _activeTabId.value == tabId
-        val urlToRestore = tab.url
-
-        runCatching { (deadWebView.parent as? android.view.ViewGroup)?.removeView(deadWebView) }
-
-        val context = deadWebView.context
-        val freshWebView = createConfiguredWebView(context, tab.isPrivate)
-        freshWebView.addJavascriptInterface(mediaPlaybackBridge.jsInterfaceFor(tabId), "AstraMedia")
-        webViews[tabId] = freshWebView
-        webViewConfigurer?.invoke(tabId, freshWebView)
-
-        // A brand-new WebView has no load history of its own (its `update`
-        // block in AstraWebViewHost would otherwise think tab.url is
-        // already loaded and skip it), so load directly here as the
-        // immediate, authoritative restore rather than relying on that
-        // comparison to notice on the next recomposition.
-        if (urlToRestore.isNotBlank()) {
-            freshWebView.loadUrl(urlToRestore)
-        }
-        if (!wasActive) {
-            // Off-screen crashed tab: keep it frozen like any other
-            // background tab until the user actually switches to it,
-            // rather than burning CPU re-rendering a page nobody's looking
-            // at yet.
-            runCatching { freshWebView.onPause() }
-        }
-        updateTab(tabId) { it.copy(isLoading = urlToRestore.isNotBlank()) }
-    }
-
     fun createTab(context: Context, isPrivate: Boolean = false, url: String? = null): Tab {
-        val previous = _activeTabId.value
         val tab = Tab(isPrivate = isPrivate, url = url ?: "", isBlankTab = url.isNullOrBlank())
         val webView = createConfiguredWebView(context, isPrivate)
         webView.addJavascriptInterface(mediaPlaybackBridge.jsInterfaceFor(tab.id), "AstraMedia")
         webViews[tab.id] = webView
         webViewConfigurer?.invoke(tab.id, webView)
         _tabs.update { it + tab }
-        tabUrlCache[tab.id] = tab.url
         _activeTabId.value = tab.id
         if (!url.isNullOrBlank()) webView.loadUrl(url)
-        pauseIfNoLongerActive(previous)
         return tab
     }
 
@@ -233,7 +58,6 @@ class TabManager @Inject constructor(
             destroy()
         }
         webViews.remove(tabId)
-        tabUrlCache.remove(tabId)
         mediaPlaybackBridge.clearTab(tabId)
         _tabs.update { list -> list.filterNot { it.id == tabId } }
 
@@ -246,7 +70,6 @@ class TabManager @Inject constructor(
     fun closeAllTabs() {
         webViews.values.forEach { it.stopLoading(); it.destroy() }
         webViews.clear()
-        tabUrlCache.clear()
         _tabs.value = emptyList()
         _activeTabId.value = null
     }
@@ -254,31 +77,20 @@ class TabManager @Inject constructor(
     fun closeAllPrivateTabs() {
         val privateIds = _tabs.value.filter { it.isPrivate }.map { it.id }
         privateIds.forEach { closeTab(it) }
+        // Cookies are a single process-wide store in Android WebView --
+        // closing a private tab alone leaves anything it set (session
+        // cookies, login state) sitting in memory for the next private
+        // tab, or even a normal tab, to see. Flush it explicitly so
+        // "close private tabs" actually behaves like "forget this
+        // session" rather than just removing the tab UI.
+        android.webkit.CookieManager.getInstance().removeAllCookies(null)
+        android.webkit.WebStorage.getInstance().deleteAllData()
     }
 
-    /**
-     * Switching tabs is where a LOT of unnecessary heat/battery drain was
-     * coming from: this used to only flip which tab is considered "active"
-     * in the UI, while every WebView -- including every tab NOT on screen
-     * -- kept running its JS timers, animations, and rendering at full
-     * speed indefinitely. Open 4-5 heavy sites (exactly the ad-heavy
-     * download-portal case this browser is built for) and all of them were
-     * burning CPU simultaneously even though only one was ever visible.
-     *
-     * Fix: pause every other tab's WebView when switching away from it,
-     * unless MediaPlaybackBridge confirms it's actually playing audio/video
-     * (that tab needs to keep running so the sound doesn't cut out) or
-     * background playback would otherwise keep it alive anyway. The tab
-     * being switched TO always resumes.
-     */
     fun switchTo(tabId: String) {
         if (_tabs.value.any { it.id == tabId }) {
-            val previous = _activeTabId.value
             _activeTabId.value = tabId
             updateTab(tabId) { it.copy(lastAccessedAt = System.currentTimeMillis()) }
-
-            webViews[tabId]?.let { runCatching { it.onResume() } }
-            if (previous != tabId) pauseIfNoLongerActive(previous)
         }
     }
 
@@ -289,77 +101,13 @@ class TabManager @Inject constructor(
 
     fun updateTab(tabId: String, transform: (Tab) -> Tab) {
         _tabs.update { list -> list.map { if (it.id == tabId) transform(it) else it } }
-        _tabs.value.find { it.id == tabId }?.let { tabUrlCache[tabId] = it.url }
     }
-
-    // O(1) URL lookup for shouldInterceptRequest, which previously did a
-    // linear scan of the full tab list on EVERY single network sub-resource
-    // of every page (every image, script, font, XHR -- easily hundreds on a
-    // heavy/ad-dense site). With more tabs open, that scan got proportionally
-    // slower on exactly the hot path that runs most often. A plain HashMap
-    // keyed by tab ID, kept in sync wherever a tab's URL can change, turns
-    // that into a single map lookup regardless of tab count.
-    private val tabUrlCache = ConcurrentHashMap<String, String>()
-
-    /** O(1) equivalent of `tabs.value.find { it.id == tabId }?.url` for the WebView IO-thread hot path. */
-    fun urlForTab(tabId: String): String? = tabUrlCache[tabId]
 
     fun tabCount(includePrivate: Boolean = true): Int =
         _tabs.value.count { includePrivate || !it.isPrivate }
 
-    /**
-     * Installs every document-start script, in a fixed order: state first
-     * (everything else reads window.__astra), then the feature scripts.
-     * addDocumentStartJavaScript guarantees these run BEFORE any page script,
-     * on every navigation. Older WebViews without the feature simply skip this
-     * and rely on AstraWebViewClient's onPageStarted best-effort injection.
-     */
-    private fun installDocumentStartScripts(webView: WebView) {
-        if (!androidx.webkit.WebViewFeature.isFeatureSupported(
-                androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT
-            )
-        ) return
-        val rules = setOf("*")
-        listOf(
-            PageScripts.STATE_JS,
-            ANTI_POPUNDER_JS,
-            PageScripts.BACKGROUND_SPOOF_JS,
-            PageScripts.YOUTUBE_ADS_JS,
-            PageScripts.DESKTOP_VIEWPORT_JS
-        ).forEach { js ->
-            androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, js, rules)
-        }
-    }
-
-    /** Pushes the live runtime flags into a page so toggles apply without reload. */
-    fun pushFlags(webView: WebView) {
-        val bg = mediaPlaybackBridge.keepPlayingInBackground.value
-        val yt = ytAdSkipEnabled
-        webView.evaluateJavascript(
-            "(function(){if(window.__astra){__astra.set('bg',$bg);__astra.set('ytSkip',$yt);}})();",
-            null
-        )
-    }
-
-    @Volatile var ytAdSkipEnabled: Boolean = true
-        set(value) {
-            field = value
-            webViews.values.forEach { wv -> wv.post { pushFlags(wv) } }
-        }
-
-    /** Re-push flags to every WebView when Background playback is toggled. */
-    fun onBackgroundPlaybackChanged() {
-        webViews.values.forEach { wv -> wv.post { pushFlags(wv) } }
-    }
-
-    /** Marks a tab as desktop/mobile for the viewport script (no reload here). */
-    fun setDesktopFlag(webView: WebView, desktop: Boolean) {
-        webView.evaluateJavascript("window.__astraDesktop=$desktop;", null)
-    }
-
     private fun createConfiguredWebView(context: Context, isPrivate: Boolean): WebView {
         return WebView(context).apply {
-            installDocumentStartScripts(this)
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = !isPrivate
@@ -369,27 +117,12 @@ class TabManager @Inject constructor(
                 setSupportZoom(true)
                 builtInZoomControls = true
                 displayZoomControls = false
-                // COMPATIBILITY_MODE (not NEVER_ALLOW): matches what real
-                // desktop/mobile Chrome does today -- blocks genuinely
-                // dangerous active mixed content (scripts, iframes over
-                // HTTP) but tolerates passive content (images, some media)
-                // that's still common on older/less-maintained sites,
-                // notably the ad-heavy download/file-host sites this
-                // browser is regularly used on. NEVER_ALLOW is stricter
-                // than any mainstream browser ships by default and was
-                // silently breaking pages on exactly those sites (missing
-                // images, broken layout, dead-looking download buttons).
-                mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
                 // Video sites (YouTube etc.) need this false, or autoplay /
                 // inline playback / fullscreen video breaks on first tap.
                 mediaPlaybackRequiresUserGesture = false
                 setSupportMultipleWindows(true)
-                // MUST be true: with false, WebView silently swallows EVERY
-                // window.open() -- including the ones real "Download / Watch /
-                // Get Links" buttons on link-hub sites use. Unwanted popups
-                // are still filtered by AstraWebChromeClient.onCreateWindow
-                // (no-gesture popups dropped) plus the JS guard below.
-                javaScriptCanOpenWindowsAutomatically = true
+                javaScriptCanOpenWindowsAutomatically = false
 
                 // --- Required for modern sites (YouTube, Gmail, Twitter/X,
                 // anything React/Vue-based) to lay out and behave correctly.
@@ -402,143 +135,16 @@ class TabManager @Inject constructor(
                 allowFileAccess = false // security: no arbitrary file:// reads
                 loadsImagesAutomatically = true
                 textZoom = 100
-                // (setRenderPriority is deprecated & a no-op on modern WebView;
-                // removed. Forcing HIGH only encouraged extra CPU work.)
-                offscreenPreRaster = false // don't rasterize off-screen content -> less GPU/heat
-                // Google Safe Browsing shows a full, non-dismissible-by-
-                // default red interstitial and can outright refuse to load
-                // a page the instant it's flagged -- and it flags download
-                // portals / streaming / anime-dub sites constantly, because
-                // their AD NETWORKS occasionally serve malicious payloads
-                // even when the site's own content is completely fine. From
-                // the user's side this looks exactly like "heavy sites just
-                // won't open" with no visible reason why. Astra's own
-                // ad/tracker blocking (ContentBlocker) is the actual
-                // protection layer here -- it stops the malicious ad
-                // requests themselves rather than refusing the whole page
-                // because of them. Real Chromium-based browsers built for
-                // this kind of site (Brave included) ship their own
-                // phishing/malware protection instead of Google's for
-                // exactly this reason.
-                safeBrowsingEnabled = false
+                setRenderPriority(android.webkit.WebSettings.RenderPriority.HIGH)
             }
 
-            // Default layer type (hardware via the Activity's flag). Forcing
-            // LAYER_TYPE_HARDWARE on the WebView itself allocates an extra
-            // full-screen GPU texture per tab -> more memory and heat.
-            overScrollMode = android.view.View.OVER_SCROLL_NEVER
+            // Hardware-accelerated layer for smooth scrolling/video on heavy
+            // pages (matches the Activity's android:hardwareAccelerated flag).
+            setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
 
             val cookieManager = android.webkit.CookieManager.getInstance()
             cookieManager.setAcceptCookie(true) // Astra's own tracking-protection layer decides third-party blocking per-request; site login state needs first-party cookies even in private mode.
             cookieManager.setAcceptThirdPartyCookies(this, !isPrivate)
         }
-    }
-
-    private companion object {
-        /**
-         * Neutralizes the three click-hijack tricks that make buttons on
-         * ad-heavy sites (download/streaming/anime-dub sites especially)
-         * appear completely unresponsive:
-         *  1. window.open() popunders fired without a genuine, current tap.
-         *  2. Invisible full-viewport overlay elements stacked above the
-         *     real button that steal the tap.
-         *  3. Href-swap-on-click tricks that briefly point a link at an ad
-         *     URL only during the click event, then restore it.
-         * Runs before any page script via addDocumentStartJavaScript.
-         */
-        const val ANTI_POPUNDER_JS = """
-            (function() {
-                if (window.__astraPopunderGuardInstalled) return;
-                window.__astraPopunderGuardInstalled = true;
-
-                // Any real user input counts as a gesture. Touch devices fire
-                // touchstart/touchend/click, NOT always pointerdown first, and
-                // slow sites open the window well after 1.2 s, so track all of
-                // them and allow a generous window.
-                var lastGesture = 0;
-                var opensThisGesture = 0;
-                function markGesture() {
-                    var now = Date.now();
-                    // One physical tap fires touchstart/touchend/mousedown/click
-                    // within a few ms of each other. Only treat it as a NEW tap
-                    // (and reset the per-tap open budget) after a real gap.
-                    if (now - lastGesture > 700) opensThisGesture = 0;
-                    lastGesture = now;
-                }
-                ['pointerdown','touchstart','touchend','mousedown','click','keydown'].forEach(function(t) {
-                    document.addEventListener(t, markGesture, true);
-                });
-
-                var nativeOpen = window.open;
-                window.open = function(url, target, features) {
-                    var withinGesture = (Date.now() - lastGesture) < 4000;
-                    // No user tap at all -> classic popunder. Drop it.
-                    if (!withinGesture) return null;
-                    // ONE new tab per tap. A second window.open() from the same
-                    // tap is almost always an ad, so it is dropped here.
-                    if (opensThisGesture >= 1) return null;
-                    opensThisGesture++;
-                    // Blank opens are passed through too: some sites open
-                    // about:blank first and then set its location.
-                    return nativeOpen.call(window, url, target, features);
-                };
-
-                function isHijackOverlay(el) {
-                    if (!el || el === document.body || el === document.documentElement) return false;
-                    var cs = window.getComputedStyle(el);
-                    if (cs.position !== 'fixed' && cs.position !== 'absolute') return false;
-                    var r = el.getBoundingClientRect();
-                    var coversViewport = r.width >= window.innerWidth * 0.8 &&
-                                          r.height >= window.innerHeight * 0.8;
-                    if (!coversViewport) return false;
-                    var z = parseInt(cs.zIndex, 10) || 0;
-                    // Require near-total transparency (not just low opacity)
-                    // AND a transparent background specifically -- a legit
-                    // full-screen modal/lightbox with a dim backdrop
-                    // (opacity ~0.1-0.5, solid rgba background) was getting
-                    // misclassified as a hijack overlay and killed on click,
-                    // which is what made real download buttons on some sites
-                    // look completely dead.
-                    var nearInvisible = parseFloat(cs.opacity) < 0.05 &&
-                                         cs.backgroundColor === 'rgba(0, 0, 0, 0)';
-                    return z > 1 && nearInvisible;
-                }
-
-                document.addEventListener('click', function(ev) {
-                    var el = ev.target;
-                    var depth = 0;
-                    while (el && depth < 4) {
-                        if (isHijackOverlay(el)) {
-                            el.style.pointerEvents = 'none';
-                            el.style.display = 'none';
-                            var real = document.elementFromPoint(ev.clientX, ev.clientY);
-                            if (real && real !== el) {
-                                real.dispatchEvent(new MouseEvent('click', {
-                                    bubbles: true, cancelable: true,
-                                    clientX: ev.clientX, clientY: ev.clientY
-                                }));
-                            }
-                            ev.stopImmediatePropagation();
-                            ev.preventDefault();
-                            return;
-                        }
-                        el = el.parentElement;
-                        depth++;
-                    }
-                }, true);
-
-                document.addEventListener('mousedown', function(ev) {
-                    var a = ev.target && ev.target.closest ? ev.target.closest('a[href]') : null;
-                    if (a) a.dataset.__astraHref = a.getAttribute('href');
-                }, true);
-                document.addEventListener('click', function(ev) {
-                    var a = ev.target && ev.target.closest ? ev.target.closest('a[href]') : null;
-                    if (a && a.dataset.__astraHref && a.getAttribute('href') !== a.dataset.__astraHref) {
-                        a.setAttribute('href', a.dataset.__astraHref);
-                    }
-                }, true);
-            })();
-        """
-
     }
 }

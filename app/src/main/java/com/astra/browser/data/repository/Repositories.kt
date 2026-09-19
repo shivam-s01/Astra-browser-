@@ -44,7 +44,6 @@ class DownloadRepository @Inject constructor(private val dao: DownloadDao) {
     suspend fun clearAll() = dao.clearAll()
     suspend fun getById(id: Long): DownloadEntity? = dao.getById(id)
     suspend fun getBySystemId(systemDownloadId: Long): DownloadEntity? = dao.getBySystemId(systemDownloadId)
-    suspend fun getActive(): List<DownloadEntity> = dao.getActive()
 }
 
 @Singleton

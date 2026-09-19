@@ -1,6 +1,5 @@
 package com.astra.browser.core.engine
 
-import android.os.Message
 import android.view.View
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
@@ -12,12 +11,7 @@ class AstraWebChromeClient(
     private val tabId: String,
     private val tabManager: TabManager,
     private val permissionManager: PermissionManager,
-    private val onFullscreenChange: (View?, CustomViewCallback?) -> Unit,
-    /** Called when a page asks for a new window/tab (target=_blank, window.open). */
-    private val onNewWindowRequested: (url: String, userGesture: Boolean) -> Unit,
-    private val popupsBlocked: () -> Boolean,
-    /** True if this popup target is a known ad/tracker host and should be dropped (and counted). */
-    private val isAdPopupTarget: (url: String) -> Boolean = { false }
+    private val onFullscreenChange: (View?, CustomViewCallback?) -> Unit
 ) : WebChromeClient() {
 
     override fun onProgressChanged(view: WebView, newProgress: Int) {
@@ -32,6 +26,19 @@ class AstraWebChromeClient(
         }
     }
 
+    /**
+     * Video sites (YouTube etc.) call this to go fullscreen. Previously
+     * onFullscreenChange was wired to an empty lambda `{ }`, which meant:
+     *  - the custom view was never actually attached anywhere, so
+     *    fullscreen video had nowhere to render
+     *  - `callback` (CustomViewCallback) was silently dropped and its
+     *    onCustomViewHidden() was NEVER invoked
+     * The second part is the actual crash cause: WebView/Chromium keeps
+     * internal state tied to that callback lifecycle. Never resolving it
+     * left the WebView in a broken internal state that could surface as a
+     * crash on the next navigation (e.g. searching right after visiting a
+     * video-heavy site like YouTube).
+     */
     override fun onShowCustomView(view: View, callback: CustomViewCallback) {
         onFullscreenChange(view, callback)
     }
@@ -42,53 +49,5 @@ class AstraWebChromeClient(
 
     override fun onPermissionRequest(request: PermissionRequest) {
         permissionManager.handleWebPermissionRequest(request)
-    }
-
-    /**
-     * setSupportMultipleWindows(true) is set on every WebView, which means
-     * links with target="_blank" and window.open() call THIS method. It was
-     * never overridden, so WebView returned false and those links did
-     * nothing at all -- a big part of "links don't open".
-     *
-     * Trick: give the requester a throw-away WebView, let it resolve the
-     * real target URL (the transport hands it to us), then open that URL in
-     * a proper new tab and discard the throw-away.
-     *
-     * Popups without a user gesture are dropped when popup blocking is on.
-     */
-    override fun onCreateWindow(
-        view: WebView,
-        isDialog: Boolean,
-        isUserGesture: Boolean,
-        resultMsg: Message
-    ): Boolean {
-        if (popupsBlocked() && !isUserGesture) return false
-
-        val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
-        val temp = WebView(view.context)
-        temp.webViewClient = object : android.webkit.WebViewClient() {
-            private var handled = false
-            override fun shouldOverrideUrlLoading(v: WebView, request: android.webkit.WebResourceRequest): Boolean {
-                deliver(v, request.url.toString())
-                return true
-            }
-            override fun onPageStarted(v: WebView, url: String, favicon: android.graphics.Bitmap?) {
-                deliver(v, url)
-            }
-            private fun deliver(v: WebView, url: String) {
-                if (handled || url.isBlank() || url == "about:blank") return
-                handled = true
-                v.stopLoading()
-                // Ad popups (known ad-network hosts) are dropped instead of
-                // opening a new tab; genuine link targets open normally.
-                if (!(popupsBlocked() && isAdPopupTarget(url))) {
-                    onNewWindowRequested(url, isUserGesture)
-                }
-                v.post { v.destroy() }
-            }
-        }
-        transport.webView = temp
-        resultMsg.sendToTarget()
-        return true
     }
 }

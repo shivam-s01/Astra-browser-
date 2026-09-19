@@ -61,6 +61,7 @@ android {
 dependencies {
     // Core
     implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.biometric:biometric:1.2.0-alpha05")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.activity:activity-compose:1.9.3")
@@ -90,9 +91,6 @@ dependencies {
 
     // WebView + browser support
     implementation("androidx.webkit:webkit:1.12.1")
-
-    // MediaSession (lock-screen / Bluetooth / notification media controls)
-    implementation("androidx.media:media:1.7.0")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")

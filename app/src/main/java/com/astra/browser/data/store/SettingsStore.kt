@@ -40,32 +40,7 @@ class SettingsStore @Inject constructor(
         val SHOW_CLOCK = booleanPreferencesKey("show_clock")
         val SHOW_RECENT_SITES = booleanPreferencesKey("show_recent_sites")
         val BACKGROUND_PLAYBACK = booleanPreferencesKey("background_playback")
-        val WALLPAPER_MODE = stringPreferencesKey("wallpaper_mode")
-        val WALLPAPER_VERSION = longPreferencesKey("wallpaper_version")
-        val WALLPAPER_DIM = floatPreferencesKey("wallpaper_dim")
-        val SHIELD_OFF_SITES = stringSetPreferencesKey("shield_off_sites")
-        val DESKTOP_SITES = stringSetPreferencesKey("desktop_sites")
-
-        // ---- Layout / home customisation ----
-        val URL_BAR_BOTTOM = booleanPreferencesKey("url_bar_bottom")
-        val SHOW_SHIELD_CARD = booleanPreferencesKey("show_shield_card")
-        val SHOW_SEARCH_BAR = booleanPreferencesKey("show_search_bar")
-        val SHOW_GREETING = booleanPreferencesKey("show_greeting")
-        val SHOW_DATE = booleanPreferencesKey("show_date")
-        val CLOCK_24H = booleanPreferencesKey("clock_24h")
-        val CLOCK_SIZE = intPreferencesKey("clock_size")            // sp
-        val HOME_ALIGN = stringPreferencesKey("home_align")          // TOP / CENTER
-        val TILE_STYLE = stringPreferencesKey("tile_style")          // CIRCLE / SQUARE / ROUNDED
-        val TILE_COUNT = intPreferencesKey("tile_count")             // 4..10
-        val TILE_LABELS = booleanPreferencesKey("tile_labels")
-        val CARD_OPACITY = floatPreferencesKey("card_opacity")       // 0.0 .. 0.8
-        val USER_NAME = stringPreferencesKey("user_name")
-
-        // ---- Motion / performance ----
-        val ANIM_STYLE = stringPreferencesKey("anim_style")          // NONE / FADE / SLIDE / SCALE
-        val LITE_MODE = booleanPreferencesKey("lite_mode")           // low-end device mode
-        val YT_AD_SKIP = booleanPreferencesKey("yt_ad_skip")
-        val HAPTICS = booleanPreferencesKey("haptics")
+        val APP_LOCK_ENABLED = booleanPreferencesKey("app_lock_enabled")
     }
 
     val homepage: Flow<String> = context.dataStore.data.map { it[Keys.HOMEPAGE] ?: "astra://newtab" }
@@ -92,32 +67,8 @@ class SettingsStore @Inject constructor(
     val showShortcuts: Flow<Boolean> = context.dataStore.data.map { it[Keys.SHOW_SHORTCUTS] ?: true }
     val showClock: Flow<Boolean> = context.dataStore.data.map { it[Keys.SHOW_CLOCK] ?: true }
     val showRecentSites: Flow<Boolean> = context.dataStore.data.map { it[Keys.SHOW_RECENT_SITES] ?: true }
-    val backgroundPlayback: Flow<Boolean> = context.dataStore.data.map { it[Keys.BACKGROUND_PLAYBACK] ?: true }
-    val wallpaperMode: Flow<String> = context.dataStore.data.map { it[Keys.WALLPAPER_MODE] ?: "NIGHT_SKY" }
-    val wallpaperVersion: Flow<Long> = context.dataStore.data.map { it[Keys.WALLPAPER_VERSION] ?: 0L }
-    /** Hosts where the user turned Shield OFF (blocking disabled just for that site). */
-    val shieldOffSites: Flow<Set<String>> = context.dataStore.data.map { it[Keys.SHIELD_OFF_SITES] ?: emptySet() }
-    /** Hosts where the user asked for the desktop version of the site. */
-    val desktopSites: Flow<Set<String>> = context.dataStore.data.map { it[Keys.DESKTOP_SITES] ?: emptySet() }
-    val wallpaperDim: Flow<Float> = context.dataStore.data.map { it[Keys.WALLPAPER_DIM] ?: 0f }
-
-    val urlBarBottom: Flow<Boolean> = context.dataStore.data.map { it[Keys.URL_BAR_BOTTOM] ?: false }
-    val showShieldCard: Flow<Boolean> = context.dataStore.data.map { it[Keys.SHOW_SHIELD_CARD] ?: true }
-    val showSearchBar: Flow<Boolean> = context.dataStore.data.map { it[Keys.SHOW_SEARCH_BAR] ?: true }
-    val showGreeting: Flow<Boolean> = context.dataStore.data.map { it[Keys.SHOW_GREETING] ?: false }
-    val showDate: Flow<Boolean> = context.dataStore.data.map { it[Keys.SHOW_DATE] ?: true }
-    val clock24h: Flow<Boolean> = context.dataStore.data.map { it[Keys.CLOCK_24H] ?: false }
-    val clockSize: Flow<Int> = context.dataStore.data.map { it[Keys.CLOCK_SIZE] ?: 64 }
-    val homeAlign: Flow<String> = context.dataStore.data.map { it[Keys.HOME_ALIGN] ?: "TOP" }
-    val tileStyle: Flow<String> = context.dataStore.data.map { it[Keys.TILE_STYLE] ?: "CIRCLE" }
-    val tileCount: Flow<Int> = context.dataStore.data.map { it[Keys.TILE_COUNT] ?: 8 }
-    val tileLabels: Flow<Boolean> = context.dataStore.data.map { it[Keys.TILE_LABELS] ?: true }
-    val cardOpacity: Flow<Float> = context.dataStore.data.map { it[Keys.CARD_OPACITY] ?: 0.40f }
-    val userName: Flow<String> = context.dataStore.data.map { it[Keys.USER_NAME] ?: "" }
-    val animStyle: Flow<String> = context.dataStore.data.map { it[Keys.ANIM_STYLE] ?: "FADE" }
-    val liteMode: Flow<Boolean> = context.dataStore.data.map { it[Keys.LITE_MODE] ?: true }
-    val ytAdSkip: Flow<Boolean> = context.dataStore.data.map { it[Keys.YT_AD_SKIP] ?: true }
-    val haptics: Flow<Boolean> = context.dataStore.data.map { it[Keys.HAPTICS] ?: true }
+    val backgroundPlayback: Flow<Boolean> = context.dataStore.data.map { it[Keys.BACKGROUND_PLAYBACK] ?: false }
+    val appLockEnabled: Flow<Boolean> = context.dataStore.data.map { it[Keys.APP_LOCK_ENABLED] ?: false }
 
     suspend fun setHomepage(value: String) = edit { it[Keys.HOMEPAGE] = value }
     suspend fun setSearchEngine(value: String) = edit { it[Keys.SEARCH_ENGINE] = value }
@@ -148,35 +99,7 @@ class SettingsStore @Inject constructor(
     suspend fun setShowClock(value: Boolean) = edit { it[Keys.SHOW_CLOCK] = value }
     suspend fun setShowRecentSites(value: Boolean) = edit { it[Keys.SHOW_RECENT_SITES] = value }
     suspend fun setBackgroundPlayback(value: Boolean) = edit { it[Keys.BACKGROUND_PLAYBACK] = value }
-    suspend fun setWallpaperMode(value: String) = edit { it[Keys.WALLPAPER_MODE] = value }
-    suspend fun setWallpaperVersion(value: Long) = edit { it[Keys.WALLPAPER_VERSION] = value }
-    suspend fun setWallpaperDim(value: Float) = edit { it[Keys.WALLPAPER_DIM] = value }
-    suspend fun setShieldEnabledForSite(host: String, enabled: Boolean) = edit {
-        val cur = it[Keys.SHIELD_OFF_SITES] ?: emptySet()
-        it[Keys.SHIELD_OFF_SITES] = if (enabled) cur - host else cur + host
-    }
-    suspend fun setDesktopForSite(host: String, desktop: Boolean) = edit {
-        val cur = it[Keys.DESKTOP_SITES] ?: emptySet()
-        it[Keys.DESKTOP_SITES] = if (desktop) cur + host else cur - host
-    }
-
-    suspend fun setUrlBarBottom(v: Boolean) = edit { it[Keys.URL_BAR_BOTTOM] = v }
-    suspend fun setShowShieldCard(v: Boolean) = edit { it[Keys.SHOW_SHIELD_CARD] = v }
-    suspend fun setShowSearchBar(v: Boolean) = edit { it[Keys.SHOW_SEARCH_BAR] = v }
-    suspend fun setShowGreeting(v: Boolean) = edit { it[Keys.SHOW_GREETING] = v }
-    suspend fun setShowDate(v: Boolean) = edit { it[Keys.SHOW_DATE] = v }
-    suspend fun setClock24h(v: Boolean) = edit { it[Keys.CLOCK_24H] = v }
-    suspend fun setClockSize(v: Int) = edit { it[Keys.CLOCK_SIZE] = v.coerceIn(36, 96) }
-    suspend fun setHomeAlign(v: String) = edit { it[Keys.HOME_ALIGN] = v }
-    suspend fun setTileStyle(v: String) = edit { it[Keys.TILE_STYLE] = v }
-    suspend fun setTileCount(v: Int) = edit { it[Keys.TILE_COUNT] = v.coerceIn(4, 10) }
-    suspend fun setTileLabels(v: Boolean) = edit { it[Keys.TILE_LABELS] = v }
-    suspend fun setCardOpacity(v: Float) = edit { it[Keys.CARD_OPACITY] = v.coerceIn(0f, 0.8f) }
-    suspend fun setUserName(v: String) = edit { it[Keys.USER_NAME] = v.take(24) }
-    suspend fun setAnimStyle(v: String) = edit { it[Keys.ANIM_STYLE] = v }
-    suspend fun setLiteMode(v: Boolean) = edit { it[Keys.LITE_MODE] = v }
-    suspend fun setYtAdSkip(v: Boolean) = edit { it[Keys.YT_AD_SKIP] = v }
-    suspend fun setHaptics(v: Boolean) = edit { it[Keys.HAPTICS] = v }
+    suspend fun setAppLockEnabled(value: Boolean) = edit { it[Keys.APP_LOCK_ENABLED] = value }
 
     suspend fun resetAll() = context.dataStore.edit { it.clear() }
 
