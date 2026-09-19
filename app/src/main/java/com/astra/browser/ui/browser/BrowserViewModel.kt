@@ -140,6 +140,11 @@ class BrowserViewModel @Inject constructor(
 
     fun switchTab(tabId: String) = tabManager.switchTo(tabId)
 
+    /** Snapshots the on-screen tab so the tab switcher's card shows a live preview, not a blank one. */
+    fun captureActiveTabThumbnail() = tabManager.captureActiveTabThumbnail()
+
+    fun closeAllTabs() = tabManager.closeAllTabs()
+
     fun duplicateTab(tabId: String) = tabManager.duplicateTab(context, tabId)
 
     fun reopenClosedTab(url: String) {

@@ -1,12 +1,15 @@
 package com.astra.browser.core.tabs
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.webkit.WebView
 import com.astra.browser.core.media.MediaPlaybackBridge
 import com.astra.browser.domain.model.Tab
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -59,6 +62,7 @@ class TabManager @Inject constructor(
         }
         webViews.remove(tabId)
         mediaPlaybackBridge.clearTab(tabId)
+        closedTab?.thumbnailPath?.let { runCatching { File(it).delete() } }
         _tabs.update { list -> list.filterNot { it.id == tabId } }
 
         if (_activeTabId.value == tabId) {
@@ -89,8 +93,39 @@ class TabManager @Inject constructor(
 
     fun switchTo(tabId: String) {
         if (_tabs.value.any { it.id == tabId }) {
+            // Snapshot the outgoing tab's live content before it goes into the
+            // background -- this is what lets the tab switcher show a real
+            // preview of where the user left off instead of a blank card.
+            _activeTabId.value?.takeIf { it != tabId }?.let { captureThumbnail(it) }
             _activeTabId.value = tabId
             updateTab(tabId) { it.copy(lastAccessedAt = System.currentTimeMillis()) }
+        }
+    }
+
+    /** Snapshots whichever tab is currently on-screen. Call right before opening the tab switcher UI. */
+    fun captureActiveTabThumbnail() {
+        _activeTabId.value?.let { captureThumbnail(it) }
+    }
+
+    private fun captureThumbnail(tabId: String) {
+        val webView = webViews[tabId] ?: return
+        if (webView.width <= 0 || webView.height <= 0) return
+        runCatching {
+            val source = Bitmap.createBitmap(webView.width, webView.height, Bitmap.Config.ARGB_8888)
+            webView.draw(Canvas(source))
+            val targetWidth = 480
+            val targetHeight = (targetWidth.toFloat() / source.width * source.height)
+                .toInt()
+                .coerceAtLeast(1)
+            val scaled = Bitmap.createScaledBitmap(source, targetWidth, targetHeight, true)
+            source.recycle()
+            val dir = File(webView.context.cacheDir, "tab_thumbs").apply { mkdirs() }
+            val file = File(dir, "$tabId.jpg")
+            file.outputStream().use { scaled.compress(Bitmap.CompressFormat.JPEG, 82, it) }
+            if (scaled !== source) scaled.recycle()
+            // Bust any cached bitmap keyed on the old path/mtime by touching lastAccessedAt too,
+            // but the path itself is stable per tab so the UI re-decodes on file change alone.
+            updateTab(tabId) { it.copy(thumbnailPath = file.absolutePath) }
         }
     }
 
