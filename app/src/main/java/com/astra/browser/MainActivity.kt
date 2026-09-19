@@ -6,7 +6,6 @@ import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.fragment.app.FragmentActivity
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
@@ -35,7 +34,7 @@ import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 
 @AndroidEntryPoint
-class MainActivity : FragmentActivity() {
+class MainActivity : ComponentActivity() {
 
     @Inject lateinit var settingsStore: SettingsStore
 
@@ -105,7 +104,7 @@ private fun PrivateTabScreenGuard(viewModel: BrowserViewModel = androidx.hilt.na
  */
 @androidx.compose.runtime.Composable
 private fun AppLockGate(
-    activity: FragmentActivity,
+    activity: ComponentActivity,
     content: @androidx.compose.runtime.Composable () -> Unit
 ) {
     val settingsStore: SettingsStore = androidx.hilt.navigation.compose.hiltViewModel<AppLockViewModel>().settingsStore

@@ -78,10 +78,7 @@ fun BrowserScreen(
                         }
                     },
                     onBookmarkToggle = { activeTab?.let { viewModel.toggleBookmark(it.id) } },
-                    onTabSwitcherClick = {
-                        viewModel.captureActiveTabThumbnail()
-                        navController.navigate(AstraRoutes.TAB_SWITCHER)
-                    },
+                    onTabSwitcherClick = { navController.navigate(AstraRoutes.TAB_SWITCHER) },
                     onMenuClick = { showBrowserMenu = true }
                 )
                 if (activeTab?.isLoading == true) {
