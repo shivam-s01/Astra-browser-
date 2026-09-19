@@ -43,6 +43,8 @@ class SettingsStore @Inject constructor(
         val WALLPAPER_MODE = stringPreferencesKey("wallpaper_mode")
         val WALLPAPER_VERSION = longPreferencesKey("wallpaper_version")
         val WALLPAPER_DIM = floatPreferencesKey("wallpaper_dim")
+        val SHIELD_OFF_SITES = stringSetPreferencesKey("shield_off_sites")
+        val DESKTOP_SITES = stringSetPreferencesKey("desktop_sites")
     }
 
     val homepage: Flow<String> = context.dataStore.data.map { it[Keys.HOMEPAGE] ?: "astra://newtab" }
@@ -72,6 +74,10 @@ class SettingsStore @Inject constructor(
     val backgroundPlayback: Flow<Boolean> = context.dataStore.data.map { it[Keys.BACKGROUND_PLAYBACK] ?: false }
     val wallpaperMode: Flow<String> = context.dataStore.data.map { it[Keys.WALLPAPER_MODE] ?: "NIGHT_SKY" }
     val wallpaperVersion: Flow<Long> = context.dataStore.data.map { it[Keys.WALLPAPER_VERSION] ?: 0L }
+    /** Hosts where the user turned Shield OFF (blocking disabled just for that site). */
+    val shieldOffSites: Flow<Set<String>> = context.dataStore.data.map { it[Keys.SHIELD_OFF_SITES] ?: emptySet() }
+    /** Hosts where the user asked for the desktop version of the site. */
+    val desktopSites: Flow<Set<String>> = context.dataStore.data.map { it[Keys.DESKTOP_SITES] ?: emptySet() }
     val wallpaperDim: Flow<Float> = context.dataStore.data.map { it[Keys.WALLPAPER_DIM] ?: 0f }
 
     suspend fun setHomepage(value: String) = edit { it[Keys.HOMEPAGE] = value }
@@ -106,6 +112,14 @@ class SettingsStore @Inject constructor(
     suspend fun setWallpaperMode(value: String) = edit { it[Keys.WALLPAPER_MODE] = value }
     suspend fun setWallpaperVersion(value: Long) = edit { it[Keys.WALLPAPER_VERSION] = value }
     suspend fun setWallpaperDim(value: Float) = edit { it[Keys.WALLPAPER_DIM] = value }
+    suspend fun setShieldEnabledForSite(host: String, enabled: Boolean) = edit {
+        val cur = it[Keys.SHIELD_OFF_SITES] ?: emptySet()
+        it[Keys.SHIELD_OFF_SITES] = if (enabled) cur - host else cur + host
+    }
+    suspend fun setDesktopForSite(host: String, desktop: Boolean) = edit {
+        val cur = it[Keys.DESKTOP_SITES] ?: emptySet()
+        it[Keys.DESKTOP_SITES] = if (desktop) cur + host else cur - host
+    }
 
     suspend fun resetAll() = context.dataStore.edit { it.clear() }
 

@@ -68,7 +68,16 @@ fun AstraWebViewHost(
                 webView
             },
             update = { webView ->
+                // Track what mode THIS WebView is currently in. Changing only the
+                // UA string does nothing visible until the page is reloaded, so
+                // when the toggle flips we re-apply and reload -- exactly like
+                // Chrome's "Desktop site" checkbox.
+                val previousMode = webView.getTag(DESKTOP_TAG) as? Boolean
                 settings_applyDesktopMode(webView, tab.desktopSiteEnabled)
+                if (previousMode != null && previousMode != tab.desktopSiteEnabled) {
+                    webView.reload()
+                }
+                webView.setTag(DESKTOP_TAG, tab.desktopSiteEnabled)
 
                 // Safety net for the tab-freezing added in TabManager: this
                 // composable only ever hosts the ACTIVE tab (BrowserScreen only
@@ -101,30 +110,34 @@ fun AstraWebViewHost(
     }
 }
 
+private const val DESKTOP_TAG = 0x41535452 // "ASTR": WebView tag key for the applied mode
+
 private fun settings_applyDesktopMode(webView: android.webkit.WebView, desktop: Boolean) {
     val settings = webView.settings
     if (desktop) {
         settings.userAgentString = DESKTOP_USER_AGENT
+        // Desktop layout: ignore the page's mobile viewport and lay it out at
+        // a desktop width, zoomed out to fit, like a real desktop browser.
+        settings.useWideViewPort = true
+        settings.loadWithOverviewMode = true
+        settings.setSupportZoom(true)
+        settings.builtInZoomControls = true
+        settings.displayZoomControls = false
+        settings.layoutAlgorithm = android.webkit.WebSettings.LayoutAlgorithm.NORMAL
     } else {
-        // Android WebView's actual default UA includes a "; wv)" token
-        // (e.g. "Mozilla/5.0 (Linux; Android 13; Pixel Build/...; wv)...")
-        // that marks the request as coming from an embedded WebView rather
-        // than a real browser. A lot of JS-heavy sites (video platforms,
-        // download portals, anything that server-side feature-detects)
-        // either serve a stripped-down page, block outright, or show an
-        // "open in app" nag when they see that tag -- which reads exactly
-        // like "heavy sites won't open". Stripping just the "wv" token
-        // (same trick Chrome-derived browsers like Brave use) makes every
-        // site treat Astra as a normal mobile Chrome browser while keeping
-        // the OS/device/Chromium version info accurate and unspoofed.
+        // Android WebView's actual default UA includes a "; wv)" token that
+        // marks the request as an embedded WebView rather than a real browser.
+        // Many sites serve a stripped page or an "open in app" nag for it.
+        // Stripping it (as Chrome-derived browsers like Brave do) makes every
+        // site treat Astra as normal mobile Chrome.
         val default = settings.userAgentString
         settings.userAgentString = default
             ?.replace("; wv)", ")")
             ?.replace(" wv)", ")")
             ?: default
+        settings.useWideViewPort = true
+        settings.loadWithOverviewMode = true
     }
-    settings.useWideViewPort = true
-    settings.loadWithOverviewMode = true
 }
 
 private const val DESKTOP_USER_AGENT =

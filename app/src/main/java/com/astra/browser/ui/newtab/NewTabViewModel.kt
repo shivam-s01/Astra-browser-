@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.astra.browser.data.repository.HistoryRepository
 import com.astra.browser.data.store.SettingsStore
 import com.astra.browser.data.store.WallpaperStore
+import com.astra.browser.domain.model.SearchEngine
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.map
@@ -27,6 +28,14 @@ class NewTabViewModel @Inject constructor(
 
     val showShortcuts = settingsStore.showShortcuts
         .stateIn(viewModelScope, SharingStarted.Eagerly, true)
+
+    val showClock = settingsStore.showClock
+        .stateIn(viewModelScope, SharingStarted.Eagerly, true)
+
+    /** Display name of the user's search engine, shown inside the home search bar. */
+    val searchEngineName = settingsStore.searchEngine
+        .map { name -> runCatching { SearchEngine.valueOf(name).displayName }.getOrDefault("Google") }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "Google")
 
     val wallpaperMode = settingsStore.wallpaperMode
         .stateIn(viewModelScope, SharingStarted.Eagerly, "NIGHT_SKY")

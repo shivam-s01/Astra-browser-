@@ -1,5 +1,6 @@
 package com.astra.browser.ui.browser
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -13,12 +14,14 @@ import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusEvent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.astra.browser.theme.LocalAstraColors
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -36,6 +39,9 @@ fun AstraToolbar(
     onReloadOrStop: () -> Unit,
     onBookmarkToggle: () -> Unit,
     onBookmarksOpen: () -> Unit,
+    onShieldClick: () -> Unit,
+    blockedCount: Int = 0,
+    shieldOn: Boolean = true,
     focusRequestKey: Int = 0
 ) {
     val colors = LocalAstraColors.current
@@ -78,7 +84,11 @@ fun AstraToolbar(
                             )
                         }
                     }
-                    ShieldBadge()
+                    ShieldButton(
+                        blockedCount = blockedCount,
+                        active = shieldOn,
+                        onClick = onShieldClick
+                    )
                 }
             }
 
@@ -118,15 +128,44 @@ private fun SiteBadge(isHome: Boolean, isSecure: Boolean) {
     }
 }
 
+/**
+ * The Shield: a real, tappable button. Shows a live counter badge with how many
+ * ads/trackers were blocked on this page, dims when protection is off, and opens
+ * the Shield popup on tap.
+ */
 @Composable
-private fun ShieldBadge() {
+private fun ShieldButton(blockedCount: Int, active: Boolean, onClick: () -> Unit) {
     val colors = LocalAstraColors.current
-    Icon(
-        imageVector = Icons.Filled.Shield,
-        contentDescription = "Shields",
-        tint = colors.accent,
-        modifier = Modifier.size(28.dp).padding(end = 4.dp)
-    )
+    val tint = if (active) colors.accent else colors.onSurface.copy(alpha = 0.4f)
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Shield,
+            contentDescription = "Shield: $blockedCount blocked. Tap for controls",
+            tint = tint,
+            modifier = Modifier.size(28.dp)
+        )
+        if (active && blockedCount > 0) {
+            Surface(
+                shape = CircleShape,
+                color = colors.accent,
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 2.dp, end = 0.dp)
+            ) {
+                Text(
+                    text = if (blockedCount > 99) "99+" else blockedCount.toString(),
+                    color = colors.background,
+                    fontSize = 9.sp,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                )
+            }
+        }
+    }
 }
 
 /**

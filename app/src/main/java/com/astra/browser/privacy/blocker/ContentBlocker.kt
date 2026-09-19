@@ -9,6 +9,9 @@ import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * Request-level ad/tracker blocker.
@@ -43,7 +46,55 @@ class ContentBlocker @Inject constructor(
     @Volatile private var trackingProtectionEnabled = true
     @Volatile private var adBlockingEnabled = true
     private val perSiteOverrides = ConcurrentHashMap<String, Boolean>()
-    private val blockedCountByTab = ConcurrentHashMap<String, Int>()
+
+    /**
+     * Live per-tab stats shown in the Shield popup. Updated from Chromium IO
+     * threads (via [intercept]) but only published to the UI at a throttled
+     * rate so a heavy ad page can't flood Compose with recompositions.
+     */
+    data class TabStats(
+        val adsBlocked: Int = 0,
+        val trackersBlocked: Int = 0,
+        val allowed: Int = 0
+    ) {
+        val blocked: Int get() = adsBlocked + trackersBlocked
+        val total: Int get() = blocked + allowed
+    }
+
+    private val statsByTab = ConcurrentHashMap<String, TabStats>()
+    private val _stats = MutableStateFlow<Map<String, TabStats>>(emptyMap())
+    val stats: StateFlow<Map<String, TabStats>> = _stats.asStateFlow()
+    @Volatile private var lastPublish = 0L
+
+    /** Called with the number of NEW blocks so the app can add them to the lifetime total. */
+    @Volatile var onBlockedDelta: ((Int) -> Unit)? = null
+    private val pendingLifetime = java.util.concurrent.atomic.AtomicInteger(0)
+
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val trailingPublish = Runnable { publish(force = true) }
+
+    private fun publish(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastPublish < 250) {
+            // Throttled: make sure ONE trailing publish still fires shortly after
+            // the burst ends, otherwise the last few blocks never reach the UI
+            // when the page goes quiet right after them.
+            mainHandler.removeCallbacks(trailingPublish)
+            mainHandler.postDelayed(trailingPublish, 300)
+            return
+        }
+        lastPublish = now
+        _stats.value = HashMap(statsByTab)
+        val delta = pendingLifetime.getAndSet(0)
+        if (delta > 0) onBlockedDelta?.invoke(delta)
+    }
+
+    fun statsFor(tabId: String): TabStats = statsByTab[tabId] ?: TabStats()
+
+    /** Atomically applies [f] to a tab's stats (safe from any Chromium IO thread). */
+    private fun bump(tabId: String, f: (TabStats) -> TabStats) {
+        statsByTab.compute(tabId) { _, old -> f(old ?: TabStats()) }
+    }
 
     /** Loaded lazily on first request so app start-up isn't slowed. */
     private val blockedHosts: Set<String> by lazy { loadHosts() }
@@ -106,14 +157,30 @@ class ContentBlocker @Inject constructor(
         perSiteOverrides.remove(origin)
     }
 
-    fun blockedCountForTab(tabId: String): Int = blockedCountByTab[tabId] ?: 0
-
-    fun resetCountForTab(tabId: String) {
-        blockedCountByTab[tabId] = 0
+    /** Replaces all per-site overrides with the persisted "Shield OFF" host set. */
+    fun loadDisabledHosts(hosts: Set<String>) {
+        perSiteOverrides.clear()
+        hosts.forEach { perSiteOverrides[it] = false }
     }
 
-    fun isEnabledFor(origin: String?): Boolean =
-        (origin?.let { perSiteOverrides[it] } ?: true) && (adBlockingEnabled || trackingProtectionEnabled)
+    fun isSiteEnabled(host: String?): Boolean = host == null || perSiteOverrides[host] != false
+
+    fun blockedCountForTab(tabId: String): Int = statsByTab[tabId]?.blocked ?: 0
+
+    fun resetCountForTab(tabId: String) {
+        statsByTab[tabId] = TabStats()
+        publish(force = true)
+    }
+
+    fun clearTab(tabId: String) {
+        statsByTab.remove(tabId)
+        publish(force = true)
+    }
+
+    fun isEnabledFor(origin: String?): Boolean {
+        val host = origin?.substringAfter("://")
+        return isSiteEnabled(host) && (adBlockingEnabled || trackingProtectionEnabled)
+    }
 
     fun adBlockingOn(): Boolean = adBlockingEnabled
 
@@ -138,14 +205,55 @@ class ContentBlocker @Inject constructor(
         // a general carve-out mechanism.
         if (isExplicitlyAllowed(urlStr)) return null
 
-        val blocked = isBlockedHost(host) ||
-            (adBlockingEnabled && matchesFragment(urlStr, adPathFragments, pageOrigin, host, thirdPartyOnly = false)) ||
-            (trackingProtectionEnabled && matchesFragment(urlStr, trackerPathFragments, pageOrigin, host, thirdPartyOnly = true))
+        val hostHit = isBlockedHost(host)
+        val adHit = adBlockingEnabled &&
+            matchesFragment(urlStr, adPathFragments, pageOrigin, host, thirdPartyOnly = false)
+        val trackerHit = trackingProtectionEnabled &&
+            matchesFragment(urlStr, trackerPathFragments, pageOrigin, host, thirdPartyOnly = true)
 
-        if (!blocked) return null
+        // The host list mixes ad networks and trackers. Respect the two master
+        // switches: with ads OFF and tracking ON we only block tracker-looking
+        // hosts, and vice versa. A host that is neither switchable stays blocked
+        // only if at least one switch is on (isEnabledFor already guarantees that).
+        val hostIsTracker = hostHit && looksLikeTrackerHost(host)
+        val blockHost = hostHit && when {
+            adBlockingEnabled && trackingProtectionEnabled -> true
+            adBlockingEnabled -> !hostIsTracker
+            trackingProtectionEnabled -> hostIsTracker
+            else -> false
+        }
 
-        blockedCountByTab.merge(tabId, 1, Int::plus)
+        if (!(blockHost || adHit || trackerHit)) {
+            bump(tabId) { it.copy(allowed = it.allowed + 1) }
+            publish()
+            return null
+        }
+
+        val isTracker = trackerHit || (blockHost && hostIsTracker)
+        if (isTracker) bump(tabId) { it.copy(trackersBlocked = it.trackersBlocked + 1) }
+        else bump(tabId) { it.copy(adsBlocked = it.adsBlocked + 1) }
+        pendingLifetime.incrementAndGet()
+        publish()
         return emptyResponseFor(url.path.orEmpty())
+    }
+
+    /**
+     * True when a popup / new-window target is a known ad host. Counts it as a
+     * blocked ad for [tabId] so it shows up in the Shield popup numbers.
+     */
+    fun blockPopupTarget(tabId: String, pageOrigin: String?, url: String): Boolean {
+        if (!isEnabledFor(pageOrigin) || !adBlockingEnabled) return false
+        val host = try { URI(url).host?.lowercase() } catch (e: Exception) { null } ?: return false
+        if (!isBlockedHost(host)) return false
+        bump(tabId) { it.copy(adsBlocked = it.adsBlocked + 1) }
+        pendingLifetime.incrementAndGet()
+        publish(force = true)
+        return true
+    }
+
+    private fun looksLikeTrackerHost(host: String): Boolean {
+        for (k in TRACKER_HOST_HINTS) if (host.contains(k)) return true
+        return false
     }
 
     private fun isBlockedHost(host: String): Boolean {
@@ -225,6 +333,13 @@ class ContentBlocker @Inject constructor(
     fun cosmeticCss(): String = COSMETIC_CSS
 
     private companion object {
+        /** Substrings that mark a blocklisted host as analytics/tracking rather than advertising. */
+        val TRACKER_HOST_HINTS = arrayOf(
+            "analytics", "track", "metric", "telemetry", "pixel", "beacon", "stat",
+            "scorecardresearch", "quantserve", "hotjar", "mixpanel", "segment",
+            "amplitude", "fullstory", "clarity", "newrelic", "sentry", "bugsnag",
+            "chartbeat", "omniture", "demdex", "bluekai", "krxd", "crwdcntrl"
+        )
         val TWO_PART_SLDS = setOf("co", "com", "org", "net", "gov", "ac", "edu")
 
         val FALLBACK_HOSTS = hashSetOf(

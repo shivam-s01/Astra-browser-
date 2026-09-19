@@ -20,9 +20,20 @@ class AstraWebViewClient(
     private val onPageFinished: (String, String) -> Unit // tabId, url
 ) : WebViewClient() {
 
+    /** Host the current Shield counters belong to (see onPageStarted). */
+    private var lastStatsHost: String? = null
+
     override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
-        contentBlocker.resetCountForTab(tabId)
+        // Reset the per-page counters only when we land on a DIFFERENT site.
+        // Resetting on every onPageStarted zeroed the numbers in the middle of
+        // redirect chains (link hubs bounce through several URLs), so the
+        // Shield popup showed 0 for pages that had actually blocked plenty.
+        val newHost = contentBlocker.originOf(url)
+        if (newHost != lastStatsHost) {
+            contentBlocker.resetCountForTab(tabId)
+            lastStatsHost = newHost
+        }
         tabManager.updateTab(tabId) {
             it.copy(
                 url = url,
@@ -44,6 +55,37 @@ class AstraWebViewClient(
         // Install media hooks as early as possible; YouTube-style SPAs never
         // fire a full page load again after the first one.
         installMediaWatcher(view)
+        applyDesktopViewport(view)
+    }
+
+    /**
+     * Real "Desktop site": a desktop UA alone is not enough, because most
+     * modern pages ship <meta name="viewport" content="width=device-width"> and
+     * keep their mobile layout regardless. In desktop mode we rewrite that
+     * meta to a fixed 1024px width so the page lays out as a desktop page and
+     * WebView zooms it out to fit (overview mode).
+     */
+    private fun applyDesktopViewport(view: WebView) {
+        val desktop = tabManager.tabs.value.firstOrNull { it.id == tabId }?.desktopSiteEnabled == true
+        if (!desktop) return
+        view.evaluateJavascript(
+            """
+            (function() {
+                function fix() {
+                    var m = document.querySelector('meta[name=viewport]');
+                    if (!m) {
+                        m = document.createElement('meta');
+                        m.name = 'viewport';
+                        (document.head || document.documentElement).appendChild(m);
+                    }
+                    m.setAttribute('content', 'width=1024, initial-scale=0.1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes');
+                }
+                fix();
+                new MutationObserver(fix).observe(document.documentElement, { childList: true, subtree: true });
+            })();
+            """.trimIndent(),
+            null
+        )
     }
 
     override fun onPageFinished(view: WebView, url: String) {
@@ -61,6 +103,7 @@ class AstraWebViewClient(
             )
         }
         installMediaWatcher(view)
+        applyDesktopViewport(view)
         injectCosmeticFilter(view, url)
         onPageFinished(tabId, url)
     }

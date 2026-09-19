@@ -26,6 +26,8 @@ import com.astra.browser.ui.browser.components.AstraWebViewHost
 import com.astra.browser.ui.browser.components.BraveBottomBar
 import com.astra.browser.ui.browser.components.BrowserMenu
 import com.astra.browser.ui.browser.components.FindInPageBar
+import com.astra.browser.ui.browser.components.ShieldSheet
+import com.astra.browser.privacy.blocker.ContentBlocker
 import com.astra.browser.ui.newtab.NewTabPage
 
 @Composable
@@ -42,7 +44,23 @@ fun BrowserScreen(
     var isAddressBarFocused by remember { mutableStateOf(false) }
     var showBrowserMenu by remember { mutableStateOf(false) }
     var showFindInPage by remember { mutableStateOf(false) }
+    var showShield by remember { mutableStateOf(false) }
     var searchFocusKey by remember { mutableStateOf(0) }
+
+    // ---- Shield (live) ----
+    val shieldStats by viewModel.shieldStats.collectAsState()
+    val adBlockingOn by viewModel.adBlockingEnabled.collectAsState()
+    val trackingOn by viewModel.trackingProtectionEnabled.collectAsState()
+    val popupsOn by viewModel.blockPopupsFlow.collectAsState()
+    val lifetimeBlocked by viewModel.lifetimeBlocked.collectAsState()
+    val shieldOffSites by viewModel.shieldOffSites.collectAsState()
+    val tabStats = if (activeTab == null || activeTab.isBlankTab) ContentBlocker.TabStats()
+                   else shieldStats[activeTab.id] ?: ContentBlocker.TabStats()
+    val activeHost = remember(activeTab?.url, activeTab?.isBlankTab) {
+        if (activeTab == null || activeTab.isBlankTab) null
+        else runCatching { java.net.URI(activeTab.url).host?.lowercase() }.getOrNull()
+    }
+    val siteShieldOn = activeHost == null || activeHost !in shieldOffSites
     val fullscreenView by viewModel.fullscreenView.collectAsState()
 
     BackHandler(enabled = fullscreenView != null) {
@@ -122,6 +140,9 @@ fun BrowserScreen(
                     },
                     onBookmarkToggle = { activeTab?.let { viewModel.toggleBookmark(it.id) } },
                     onBookmarksOpen = { navController.navigate(AstraRoutes.BOOKMARKS) },
+                    onShieldClick = { showShield = true },
+                    blockedCount = tabStats.blocked,
+                    shieldOn = (adBlockingOn || trackingOn) && siteShieldOn,
                     focusRequestKey = searchFocusKey
                 )
                 if (activeTab?.isLoading == true) {
@@ -161,7 +182,8 @@ fun BrowserScreen(
                 NewTabPage(
                     onNavigate = { input ->
                         activeTab?.let { tab -> viewModel.navigate(tab.id, input) }
-                    }
+                    },
+                    onOpenShield = { showShield = true }
                 )
             } else {
                 AstraWebViewHost(
@@ -175,6 +197,28 @@ fun BrowserScreen(
                 PrivateModeBadge(modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp))
             }
         }
+    }
+
+    if (showShield) {
+        ShieldSheet(
+            host = activeHost,
+            isHome = activeTab == null || activeTab.isBlankTab,
+            stats = tabStats,
+            lifetimeBlocked = lifetimeBlocked,
+            adBlockingOn = adBlockingOn,
+            trackingOn = trackingOn,
+            popupsOn = popupsOn,
+            siteShieldOn = siteShieldOn,
+            onAdBlocking = { viewModel.setAdBlocking(it) },
+            onTracking = { viewModel.setTrackingProtection(it) },
+            onPopups = { viewModel.setBlockPopups(it) },
+            onSiteShield = { on ->
+                val tab = activeTab
+                if (tab != null && activeHost != null) viewModel.setShieldForSite(tab.id, activeHost, on)
+            },
+            onOpenPrivacy = { navController.navigate(AstraRoutes.PRIVACY_DASHBOARD); showShield = false },
+            onDismiss = { showShield = false }
+        )
     }
 
     if (showBrowserMenu) {

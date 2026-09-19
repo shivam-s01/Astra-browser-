@@ -15,7 +15,9 @@ class AstraWebChromeClient(
     private val onFullscreenChange: (View?, CustomViewCallback?) -> Unit,
     /** Called when a page asks for a new window/tab (target=_blank, window.open). */
     private val onNewWindowRequested: (url: String, userGesture: Boolean) -> Unit,
-    private val popupsBlocked: () -> Boolean
+    private val popupsBlocked: () -> Boolean,
+    /** True if this popup target is a known ad/tracker host and should be dropped (and counted). */
+    private val isAdPopupTarget: (url: String) -> Boolean = { false }
 ) : WebChromeClient() {
 
     override fun onProgressChanged(view: WebView, newProgress: Int) {
@@ -77,7 +79,11 @@ class AstraWebChromeClient(
                 if (handled || url.isBlank() || url == "about:blank") return
                 handled = true
                 v.stopLoading()
-                onNewWindowRequested(url, isUserGesture)
+                // Ad popups (known ad-network hosts) are dropped instead of
+                // opening a new tab; genuine link targets open normally.
+                if (!(popupsBlocked() && isAdPopupTarget(url))) {
+                    onNewWindowRequested(url, isUserGesture)
+                }
                 v.post { v.destroy() }
             }
         }

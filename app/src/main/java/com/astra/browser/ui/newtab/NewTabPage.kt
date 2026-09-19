@@ -4,15 +4,27 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -35,18 +47,22 @@ import kotlin.math.sin
 import kotlin.random.Random
 
 /**
- * Brave-style new tab page: full-bleed night-sky wallpaper with a
- * translucent shortcut row on top. The browser chrome (URL bar on top,
- * bottom navigation) is owned by BrowserScreen, so this composable only
- * renders the content area.
+ * Brave-style new tab page: full-bleed wallpaper with a live clock, a real
+ * search bar, a Shield stats card and the shortcut strip on top. The browser
+ * chrome (URL bar on top, bottom navigation) is owned by BrowserScreen, so this
+ * composable only renders the content area.
  */
 @Composable
 fun NewTabPage(
     onNavigate: (String) -> Unit,
+    onOpenShield: () -> Unit = {},
     viewModel: NewTabViewModel = hiltViewModel()
 ) {
     val recentSites by viewModel.recentSites.collectAsState()
     val showShortcuts by viewModel.showShortcuts.collectAsState()
+    val showClock by viewModel.showClock.collectAsState()
+    val engineName by viewModel.searchEngineName.collectAsState()
+    val lifetimeBlocked by viewModel.totalTrackersBlocked.collectAsState()
     val wallpaperMode by viewModel.wallpaperMode.collectAsState()
     val wallpaperDim by viewModel.wallpaperDim.collectAsState()
     val customWallpaper by viewModel.customWallpaper.collectAsState()
@@ -59,13 +75,43 @@ fun NewTabPage(
             modifier = Modifier.fillMaxSize()
         )
 
-        Column(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            if (showClock) {
+                HomeClock(modifier = Modifier.padding(top = 28.dp))
+            } else {
+                Spacer(Modifier.height(20.dp))
+            }
+
+            HomeSearchBar(
+                engineName = engineName,
+                onSubmit = onNavigate,
+                modifier = Modifier
+                    .padding(top = if (showClock) 22.dp else 6.dp)
+                    .padding(horizontal = 16.dp)
+                    .fillMaxWidth()
+            )
+
+            ShieldStatsCard(
+                lifetimeBlocked = lifetimeBlocked,
+                onClick = onOpenShield,
+                modifier = Modifier
+                    .padding(top = 16.dp)
+                    .padding(horizontal = 16.dp)
+                    .fillMaxWidth()
+            )
+
             if (showShortcuts) {
                 ShortcutsCard(
                     sites = recentSites,
                     onNavigate = onNavigate,
                     modifier = Modifier
-                        .padding(top = 14.dp)
+                        .padding(top = 16.dp)
                         .fillMaxWidth()
                 )
             }
@@ -83,6 +129,191 @@ fun NewTabPage(
             )
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Live clock + date
+// ─────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun HomeClock(modifier: Modifier = Modifier) {
+    // Ticks once a second while the page is visible; stops automatically when
+    // the composable leaves the screen (LaunchedEffect is cancelled).
+    var now by remember { mutableStateOf(java.util.Date()) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        while (true) {
+            now = java.util.Date()
+            kotlinx.coroutines.delay(1000L - (System.currentTimeMillis() % 1000L))
+        }
+    }
+    val timeText = java.text.SimpleDateFormat("h:mm", java.util.Locale.getDefault()).format(now)
+    val ampm = java.text.SimpleDateFormat("a", java.util.Locale.getDefault()).format(now)
+    val dateText = java.text.SimpleDateFormat("EEEE, d MMMM", java.util.Locale.getDefault()).format(now)
+
+    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(
+                timeText,
+                color = Color.White,
+                fontSize = 64.sp,
+                fontWeight = FontWeight.Light,
+                letterSpacing = (-1).sp
+            )
+            Text(
+                ampm.lowercase(),
+                color = Color.White.copy(alpha = 0.85f),
+                fontSize = 20.sp,
+                modifier = Modifier.padding(start = 6.dp, bottom = 12.dp)
+            )
+        }
+        Text(dateText, color = Color.White.copy(alpha = 0.85f), fontSize = 15.sp)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Real search bar (type + Go / Enter -> real search or URL)
+// ─────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun HomeSearchBar(
+    engineName: String,
+    onSubmit: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var text by remember { mutableStateOf("") }
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+
+    fun submit() {
+        val q = text.trim()
+        if (q.isNotEmpty()) {
+            focusManager.clearFocus()
+            onSubmit(q)
+            text = ""
+        }
+    }
+
+    Surface(
+        modifier = modifier.height(54.dp),
+        shape = RoundedCornerShape(27.dp),
+        color = Color.Black.copy(alpha = 0.46f),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.18f))
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 18.dp, end = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Search,
+                contentDescription = null,
+                tint = Color.White.copy(alpha = 0.85f),
+                modifier = Modifier.size(22.dp)
+            )
+            Spacer(Modifier.width(12.dp))
+            androidx.compose.foundation.text.BasicTextField(
+                value = text,
+                onValueChange = { text = it },
+                singleLine = true,
+                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 16.sp),
+                cursorBrush = androidx.compose.ui.graphics.SolidColor(Color.White),
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                    imeAction = androidx.compose.ui.text.input.ImeAction.Search,
+                    autoCorrectEnabled = false
+                ),
+                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { submit() }),
+                modifier = Modifier.weight(1f),
+                decorationBox = { inner ->
+                    Box(contentAlignment = Alignment.CenterStart) {
+                        if (text.isEmpty()) {
+                            Text(
+                                "Search $engineName or type a URL",
+                                color = Color.White.copy(alpha = 0.6f),
+                                fontSize = 16.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        inner()
+                    }
+                }
+            )
+            if (text.isNotEmpty()) {
+                IconButton(onClick = { text = "" }, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        imageVector = Icons.Filled.Close,
+                        contentDescription = "Clear",
+                        tint = Color.White.copy(alpha = 0.8f),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                IconButton(onClick = { submit() }, modifier = Modifier.size(44.dp)) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                        contentDescription = "Go",
+                        tint = Color.White,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Shield stats card (tap -> opens the Shield popup)
+// ─────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun ShieldStatsCard(
+    lifetimeBlocked: Int,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.clickable(onClick = onClick),
+        shape = RoundedCornerShape(20.dp),
+        color = Color.Black.copy(alpha = 0.40f)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(shape = CircleShape, color = Color.White.copy(alpha = 0.14f), modifier = Modifier.size(44.dp)) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Filled.Shield,
+                        contentDescription = null,
+                        tint = Color(0xFF4FE3C1),
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = formatBlocked(lifetimeBlocked),
+                    color = Color.White,
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "ads & trackers blocked",
+                    color = Color.White.copy(alpha = 0.75f),
+                    fontSize = 13.sp
+                )
+            }
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = Color.White.copy(alpha = 0.6f)
+            )
+        }
+    }
+}
+
+private fun formatBlocked(n: Int): String = when {
+    n >= 1_000_000 -> String.format("%.1fM", n / 1_000_000f)
+    n >= 10_000 -> String.format("%.1fk", n / 1000f)
+    else -> n.toString()
 }
 
 // ─────────────────────────────────────────────────────────────────────────

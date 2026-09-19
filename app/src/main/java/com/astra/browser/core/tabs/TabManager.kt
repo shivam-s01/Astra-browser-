@@ -406,7 +406,12 @@ class TabManager @Inject constructor(
                 // inline playback / fullscreen video breaks on first tap.
                 mediaPlaybackRequiresUserGesture = false
                 setSupportMultipleWindows(true)
-                javaScriptCanOpenWindowsAutomatically = false
+                // MUST be true: with false, WebView silently swallows EVERY
+                // window.open() -- including the ones real "Download / Watch /
+                // Get Links" buttons on link-hub sites use. Unwanted popups
+                // are still filtered by AstraWebChromeClient.onCreateWindow
+                // (no-gesture popups dropped) plus the JS guard below.
+                javaScriptCanOpenWindowsAutomatically = true
 
                 // --- Required for modern sites (YouTube, Gmail, Twitter/X,
                 // anything React/Vue-based) to lay out and behave correctly.
@@ -468,19 +473,35 @@ class TabManager @Inject constructor(
                 if (window.__astraPopunderGuardInstalled) return;
                 window.__astraPopunderGuardInstalled = true;
 
+                // Any real user input counts as a gesture. Touch devices fire
+                // touchstart/touchend/click, NOT always pointerdown first, and
+                // slow sites open the window well after 1.2 s, so track all of
+                // them and allow a generous window.
                 var lastGesture = 0;
-                var openedForThisGesture = false;
-                document.addEventListener('pointerdown', function() {
-                    lastGesture = Date.now();
-                    openedForThisGesture = false;
-                }, true);
+                var opensThisGesture = 0;
+                function markGesture() {
+                    var now = Date.now();
+                    // One physical tap fires touchstart/touchend/mousedown/click
+                    // within a few ms of each other. Only treat it as a NEW tap
+                    // (and reset the per-tap open budget) after a real gap.
+                    if (now - lastGesture > 700) opensThisGesture = 0;
+                    lastGesture = now;
+                }
+                ['pointerdown','touchstart','touchend','mousedown','click','keydown'].forEach(function(t) {
+                    document.addEventListener(t, markGesture, true);
+                });
 
                 var nativeOpen = window.open;
                 window.open = function(url, target, features) {
-                    var withinGesture = (Date.now() - lastGesture) < 1200;
-                    if (!withinGesture || openedForThisGesture) return null;
-                    openedForThisGesture = true;
-                    if (!url || url === '' || url === 'about:blank') return null;
+                    var withinGesture = (Date.now() - lastGesture) < 4000;
+                    // No user tap at all -> classic popunder. Drop it.
+                    if (!withinGesture) return null;
+                    // ONE new tab per tap. A second window.open() from the same
+                    // tap is almost always an ad, so it is dropped here.
+                    if (opensThisGesture >= 1) return null;
+                    opensThisGesture++;
+                    // Blank opens are passed through too: some sites open
+                    // about:blank first and then set its location.
                     return nativeOpen.call(window, url, target, features);
                 };
 
