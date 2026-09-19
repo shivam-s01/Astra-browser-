@@ -126,7 +126,13 @@ class ContentBlocker @Inject constructor(
         // Full "/vast" + separator, not a bare "vast2"/"vast3" -- a bare
         // version-number fragment risks matching an unrelated path
         // (e.g. "/campaign/vast2023/") now that first-party is in scope.
-        "/vast.xml", "/vast?", "/vast/", "/vmap.xml", "/vmap?", "/adtagurl"
+        "/vast.xml", "/vast?", "/vast/", "/vmap.xml", "/vmap?", "/adtagurl",
+        // More unambiguous ad-serving shapes
+        "/ads/ga-audiences", "/pagead/viewthroughconversion", "/pagead/conversion",
+        "/ad_status.js", "/adview?", "/api/stats/qoe?adformat", "/youtubei/v1/log_event?alt=json&key=",
+        "/instream/ad_status", "/ads/preroll", "/ads/midroll", "/adx/", "/ad-break",
+        "/afs/ads", "/js/adsbygoogle", "/tag/js/gpt.js", "/gpt/pubads", "/pubads_impl",
+        "/securepubads", "/bid?", "/openrtb", "/hb/bid", "/header-bidding"
     )
 
     private val trackerPathFragments = arrayOf(
@@ -358,6 +364,14 @@ class ContentBlocker @Inject constructor(
         // when a SPECIFIC site is confirmed broken by a SPECIFIC block
         // pattern, not preemptively.
         val ALLOWLIST_FRAGMENTS = arrayOf<String>(
+            // Real video/player traffic that shares words with ad paths.
+            "googlevideo.com/videoplayback",
+            "youtube.com/youtubei/v1/player",
+            "youtube.com/youtubei/v1/next",
+            "youtube.com/youtubei/v1/browse",
+            "youtube.com/youtubei/v1/search",
+            "youtube.com/s/player/",
+            "ytimg.com/vi/",
             // e.g. "youtube.com/get_video_info" -- kept as a documented
             // example of the intended shape, not an active rule (this
             // request isn't matched by anything in adPathFragments or
@@ -421,7 +435,13 @@ class ContentBlocker @Inject constructor(
             "div[id^=\"dfp-ad-\"],div[id^=\"div-ads-\"],div[id^=\"ezoic-pub-ad-\"],div[id^=\"gpt_ad_\"]," +
             "div[id^=\"lazyad-\"],div[id^=\"sticky_ad_\"],div[id^=\"vuukle-ad-\"],div[ow-ad-unit-wrapper]," +
             "ins.adsbygoogle[data-ad-client],ins.adsbygoogle[data-ad-slot]," +
-            "span[id^=\"ezoic-pub-ad-placeholder-\"]" +
+            "span[id^=\"ezoic-pub-ad-placeholder-\"]," +
+            // YouTube shells (desktop + mobile web) -- the network request may
+            // be dropped but the empty card would otherwise leave a gap.
+            "ytd-ad-slot-renderer,ytd-in-feed-ad-layout-renderer,ytd-banner-promo-renderer," +
+            "ytm-promoted-sparkles-web-renderer,ytm-companion-ad-renderer,ytm-ad-slot-renderer," +
+            "ytd-display-ad-renderer,ytd-promoted-video-renderer,#masthead-ad,.ytp-ad-overlay-container," +
+            "ytm-statement-banner-renderer,ytm-mealbar-promo-renderer,ytd-mealbar-promo-renderer" +
             "{display:none!important;visibility:hidden!important;height:0!important;min-height:0!important;pointer-events:none!important}"
     }
 }

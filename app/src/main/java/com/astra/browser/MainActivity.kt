@@ -87,8 +87,14 @@ class MainActivity : ComponentActivity() {
             val themeIdName by settingsStore.themeId.collectAsState(initial = "SYSTEM")
             val themeId = runCatching { AstraThemeId.valueOf(themeIdName) }.getOrDefault(AstraThemeId.SYSTEM)
 
+            val uiPrefs by com.astra.browser.ui.prefs.rememberUiPrefs(settingsStore)
+
             AstraTheme(themeId = themeId) {
-                AstraApp()
+                androidx.compose.runtime.CompositionLocalProvider(
+                    com.astra.browser.ui.prefs.LocalUiPrefs provides uiPrefs
+                ) {
+                    AstraApp()
+                }
             }
         }
     }

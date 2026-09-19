@@ -2,6 +2,7 @@ package com.astra.browser.core.tabs
 
 import android.content.Context
 import android.webkit.WebView
+import com.astra.browser.core.engine.PageScripts
 import com.astra.browser.core.media.MediaPlaybackBridge
 import com.astra.browser.domain.model.Tab
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -93,44 +94,41 @@ class TabManager @Inject constructor(
     }
 
     /**
-     * App went to the background. Freeze every tab (saves CPU/heat), unless
-     * [keepMediaAlive] is true, in which case ALL WebViews stay resumed so
-     * whichever one is actually playing audio keeps playing.
+     * App went to the background.
      *
-     * This is deliberately simple and NEVER tries to first ask JS "is
-     * something actually playing right now" before deciding whether to
-     * freeze. That approach (tried and removed) queries every WebView via
-     * evaluateJavascript, which is asynchronous, then waits up to 400ms for
-     * an answer before onStop() can finish -- but onStop() is a synchronous
-     * lifecycle callback the OS does not wait around for, and the moment it
-     * returns, Android is free to fully suspend the process. In practice
-     * that query routinely lost the race (or hit its own timeout), silently
-     * fell back to "nothing is playing", and froze the WebView -- which is
-     * exactly the "song stops the instant I background the app" bug. There
-     * is no async-query version of this that can be made reliable, because
-     * the deadline (onStop returning) is not something we control.
+     * keepMediaAlive == false: freeze every tab + process-wide timers (coolest).
      *
-     * The only correct fix is to never gate the freeze decision on a query
-     * at all: if the user has background playback on, every WebView simply
-     * stays resumed while backgrounded, full stop. A WebView with nothing
-     * playing costs a small, fixed amount of idle CPU (it's not rendering,
-     * screen is off) -- nowhere near what a query-and-maybe-freeze race
-     * costs when it guesses wrong and kills real playback.
+     * keepMediaAlive == true: keep ONLY the tab(s) the JS media-watcher already
+     * reported as playing running; freeze the rest. The playing set is kept
+     * up to date synchronously by MediaPlaybackBridge (play/pause events push
+     * into it), so this is a plain in-memory lookup -- no async evaluateJavascript
+     * race like the earlier "ask the page first" attempt had. If nothing is
+     * reported playing yet (e.g. video is still buffering), we keep the ACTIVE
+     * tab alive as a safe default, so audio never gets cut by a guess.
+     *
+     * Result: background music still plays, but the 4-5 other heavy tabs stop
+     * burning CPU -- this is where most of the heat used to come from.
      */
     fun onAppBackgrounded(keepMediaAlive: Boolean) {
-        if (keepMediaAlive) {
-            webViews.values.forEach { wv ->
-                wv.onResume()
-                wv.resumeTimers()
-            }
-        } else {
-            webViews.values.forEach { it.onPause() }
-            // WebView.pauseTimers() is a PROCESS-WIDE static call, not
-            // per-instance -- calling it once affects every WebView in the
-            // app. Calling it on more than one instance would be redundant,
-            // not "more paused".
+        if (!keepMediaAlive) {
+            webViews.values.forEach { runCatching { it.onPause() } }
             webViews.values.firstOrNull()?.pauseTimers()
+            return
         }
+        val active = _activeTabId.value
+        val anyPlaying = webViews.keys.any { mediaPlaybackBridge.isPlaying(it) }
+        webViews.forEach { (id, wv) ->
+            val keep = if (anyPlaying) mediaPlaybackBridge.isPlaying(id) else id == active
+            if (keep) {
+                runCatching { wv.onResume() }
+                // Tell the page we are "visible" so the site does not self-pause.
+                pushFlags(wv)
+            } else {
+                runCatching { wv.onPause() }
+            }
+        }
+        // Timers are process-wide: they must run while anything is kept alive.
+        webViews.values.firstOrNull()?.resumeTimers()
     }
 
     fun onAppForegrounded() {
@@ -192,7 +190,6 @@ class TabManager @Inject constructor(
         val context = deadWebView.context
         val freshWebView = createConfiguredWebView(context, tab.isPrivate)
         freshWebView.addJavascriptInterface(mediaPlaybackBridge.jsInterfaceFor(tabId), "AstraMedia")
-        freshWebView.addJavascriptInterface(BackgroundStateBridge(), "AstraBackgroundState")
         webViews[tabId] = freshWebView
         webViewConfigurer?.invoke(tabId, freshWebView)
 
@@ -219,7 +216,6 @@ class TabManager @Inject constructor(
         val tab = Tab(isPrivate = isPrivate, url = url ?: "", isBlankTab = url.isNullOrBlank())
         val webView = createConfiguredWebView(context, isPrivate)
         webView.addJavascriptInterface(mediaPlaybackBridge.jsInterfaceFor(tab.id), "AstraMedia")
-        webView.addJavascriptInterface(BackgroundStateBridge(), "AstraBackgroundState")
         webViews[tab.id] = webView
         webViewConfigurer?.invoke(tab.id, webView)
         _tabs.update { it + tab }
@@ -228,17 +224,6 @@ class TabManager @Inject constructor(
         if (!url.isNullOrBlank()) webView.loadUrl(url)
         pauseIfNoLongerActive(previous)
         return tab
-    }
-
-    /**
-     * Exposes MediaPlaybackBridge.keepPlayingInBackground to page JS so the
-     * document-start visibility-spoof script can read the current value
-     * synchronously (a WebView JS interface call is synchronous), without
-     * needing a round trip through evaluateJavascript on every toggle.
-     */
-    private inner class BackgroundStateBridge {
-        @android.webkit.JavascriptInterface
-        fun keepPlayingInBackground(): Boolean = mediaPlaybackBridge.keepPlayingInBackground.value
     }
 
     fun closeTab(tabId: String): Tab? {
@@ -323,65 +308,58 @@ class TabManager @Inject constructor(
         _tabs.value.count { includePrivate || !it.isPrivate }
 
     /**
-     * Runs our popunder/click-hijack guard via WebViewCompat's
-     * addDocumentStartJavaScript, which -- unlike evaluateJavascript from
-     * onPageStarted -- is guaranteed to execute before ANY of the page's
-     * own scripts, on every navigation including SPA-style ones. This is
-     * what actually makes "Download/Watch button doesn't respond" sites
-     * work: their ad script no longer gets to install its click hijack
-     * before we've already neutralized window.open() and overlay clicks.
-     *
-     * Falls back silently on devices/WebView versions that don't support
-     * the feature (older WebView) -- AstraWebViewClient's onPageStarted
-     * injection still runs as a best-effort second layer there.
+     * Installs every document-start script, in a fixed order: state first
+     * (everything else reads window.__astra), then the feature scripts.
+     * addDocumentStartJavaScript guarantees these run BEFORE any page script,
+     * on every navigation. Older WebViews without the feature simply skip this
+     * and rely on AstraWebViewClient's onPageStarted best-effort injection.
      */
-    private fun installDocumentStartAntiPopunderGuard(webView: WebView) {
+    private fun installDocumentStartScripts(webView: WebView) {
         if (!androidx.webkit.WebViewFeature.isFeatureSupported(
                 androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT
             )
         ) return
-        androidx.webkit.WebViewCompat.addDocumentStartJavaScript(
-            webView,
+        val rules = setOf("*")
+        listOf(
+            PageScripts.STATE_JS,
             ANTI_POPUNDER_JS,
-            setOf("*")
+            PageScripts.BACKGROUND_SPOOF_JS,
+            PageScripts.YOUTUBE_ADS_JS,
+            PageScripts.DESKTOP_VIEWPORT_JS
+        ).forEach { js ->
+            androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, js, rules)
+        }
+    }
+
+    /** Pushes the live runtime flags into a page so toggles apply without reload. */
+    fun pushFlags(webView: WebView) {
+        val bg = mediaPlaybackBridge.keepPlayingInBackground.value
+        val yt = ytAdSkipEnabled
+        webView.evaluateJavascript(
+            "(function(){if(window.__astra){__astra.set('bg',$bg);__astra.set('ytSkip',$yt);}})();",
+            null
         )
     }
 
-    /**
-     * YouTube (and most other video/music sites) listen for the Page
-     * Visibility API and deliberately pause their own <video>/<audio> the
-     * instant document.hidden becomes true -- which is exactly what happens
-     * the moment the user locks the screen or switches app, even though
-     * we've already told Chromium to keep this WebView's timers/rendering
-     * alive (onResume + resumeTimers in TabManager.onAppBackgrounded).
-     * That self-pause is why "background music" would start, then cut out
-     * within a second of the screen turning off.
-     *
-     * Fix: while AstraBackgroundState.keepPlayingInBackground() is true
-     * (mirrors the user's "Background playback" setting, kept live by
-     * MediaPlaybackBridge), document.hidden / document.visibilityState /
-     * document.hasFocus() are made to always report "visible" / "focused"
-     * to page JS, and the 'visibilitychange' event is suppressed. The
-     * WebView is still genuinely backgrounded at the OS level (no extra
-     * rendering happens) -- only what the PAGE'S JS can observe changes, so
-     * it never decides to pause itself.
-     */
-    private fun installDocumentStartVisibilitySpoof(webView: WebView) {
-        if (!androidx.webkit.WebViewFeature.isFeatureSupported(
-                androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT
-            )
-        ) return
-        androidx.webkit.WebViewCompat.addDocumentStartJavaScript(
-            webView,
-            VISIBILITY_SPOOF_JS,
-            setOf("*")
-        )
+    @Volatile var ytAdSkipEnabled: Boolean = true
+        set(value) {
+            field = value
+            webViews.values.forEach { wv -> wv.post { pushFlags(wv) } }
+        }
+
+    /** Re-push flags to every WebView when Background playback is toggled. */
+    fun onBackgroundPlaybackChanged() {
+        webViews.values.forEach { wv -> wv.post { pushFlags(wv) } }
+    }
+
+    /** Marks a tab as desktop/mobile for the viewport script (no reload here). */
+    fun setDesktopFlag(webView: WebView, desktop: Boolean) {
+        webView.evaluateJavascript("window.__astraDesktop=$desktop;", null)
     }
 
     private fun createConfiguredWebView(context: Context, isPrivate: Boolean): WebView {
         return WebView(context).apply {
-            installDocumentStartAntiPopunderGuard(this)
-            installDocumentStartVisibilitySpoof(this)
+            installDocumentStartScripts(this)
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = !isPrivate
@@ -562,80 +540,5 @@ class TabManager @Inject constructor(
             })();
         """
 
-        /**
-         * Spoofs the Page Visibility API so sites like YouTube don't pause
-         * their own playback when the app is backgrounded / screen locked,
-         * as long as the user has "Background playback" enabled. Reads the
-         * live flag via the synchronous AstraBackgroundState JS interface
-         * (added alongside AstraMedia on every WebView) rather than a
-         * one-time snapshot, so toggling the setting takes effect
-         * immediately on already-open tabs/pages without a reload.
-         *
-         * document.hidden / document.webkitHidden and
-         * document.visibilityState are redefined as getters; hasFocus() is
-         * overridden; and any 'visibilitychange' / 'webkitvisibilitychange'
-         * listener the page adds is only actually invoked when we are NOT
-         * spoofing (i.e. background playback is off, or the WebView is
-         * genuinely visible) -- so real visibility changes (switching tabs
-         * within Astra, etc.) still work normally when background playback
-         * isn't in play.
-         */
-        const val VISIBILITY_SPOOF_JS = """
-            (function() {
-                if (window.__astraVisibilitySpoofInstalled) return;
-                window.__astraVisibilitySpoofInstalled = true;
-
-                function shouldSpoof() {
-                    try { return !!(window.AstraBackgroundState && AstraBackgroundState.keepPlayingInBackground()); }
-                    catch (e) { return false; }
-                }
-
-                var nativeHiddenDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
-                var nativeStateDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
-                var nativeHasFocus = Document.prototype.hasFocus;
-
-                try {
-                    Object.defineProperty(document, 'hidden', {
-                        configurable: true,
-                        get: function() {
-                            if (shouldSpoof()) return false;
-                            return nativeHiddenDesc && nativeHiddenDesc.get ? nativeHiddenDesc.get.call(document) : false;
-                        }
-                    });
-                } catch (e) {}
-
-                try {
-                    Object.defineProperty(document, 'visibilityState', {
-                        configurable: true,
-                        get: function() {
-                            if (shouldSpoof()) return 'visible';
-                            return nativeStateDesc && nativeStateDesc.get ? nativeStateDesc.get.call(document) : 'visible';
-                        }
-                    });
-                } catch (e) {}
-
-                try {
-                    document.hasFocus = function() {
-                        if (shouldSpoof()) return true;
-                        return nativeHasFocus.call(document);
-                    };
-                } catch (e) {}
-
-                // Intercept visibilitychange listeners: while spoofing, the
-                // event simply never fires for page-registered handlers, so
-                // a site's own "pause on hide" handler never runs.
-                var nativeAdd = EventTarget.prototype.addEventListener;
-                EventTarget.prototype.addEventListener = function(type, listener, options) {
-                    if ((type === 'visibilitychange' || type === 'webkitvisibilitychange') && this === document) {
-                        var wrapped = function(ev) {
-                            if (shouldSpoof()) return;
-                            return listener.apply(this, arguments);
-                        };
-                        return nativeAdd.call(this, type, wrapped, options);
-                    }
-                    return nativeAdd.call(this, type, listener, options);
-                };
-            })();
-        """
     }
 }

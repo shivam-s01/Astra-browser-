@@ -10,6 +10,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CornerBasedShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
@@ -41,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.astra.browser.theme.LocalAstraColors
+import com.astra.browser.ui.prefs.LocalUiPrefs
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -58,14 +60,16 @@ fun NewTabPage(
     onOpenShield: () -> Unit = {},
     viewModel: NewTabViewModel = hiltViewModel()
 ) {
+    val prefs = LocalUiPrefs.current
     val recentSites by viewModel.recentSites.collectAsState()
-    val showShortcuts by viewModel.showShortcuts.collectAsState()
-    val showClock by viewModel.showClock.collectAsState()
     val engineName by viewModel.searchEngineName.collectAsState()
     val lifetimeBlocked by viewModel.totalTrackersBlocked.collectAsState()
     val wallpaperMode by viewModel.wallpaperMode.collectAsState()
     val wallpaperDim by viewModel.wallpaperDim.collectAsState()
     val customWallpaper by viewModel.customWallpaper.collectAsState()
+
+    val cardAlpha = prefs.cardOpacity
+    val center = prefs.homeAlign == "CENTER"
 
     Box(modifier = Modifier.fillMaxSize()) {
         HomeWallpaper(
@@ -80,36 +84,59 @@ fun NewTabPage(
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(bottom = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = if (center) Arrangement.Center else Arrangement.Top
         ) {
-            if (showClock) {
-                HomeClock(modifier = Modifier.padding(top = 28.dp))
-            } else {
+            if (prefs.showGreeting) {
+                HomeGreeting(
+                    name = prefs.userName,
+                    modifier = Modifier.padding(top = if (center) 0.dp else 24.dp, bottom = 4.dp)
+                )
+            }
+
+            if (prefs.showClock) {
+                HomeClock(
+                    is24h = prefs.clock24h,
+                    sizeSp = prefs.clockSize,
+                    showDate = prefs.showDate,
+                    modifier = Modifier.padding(top = if (prefs.showGreeting || center) 4.dp else 28.dp)
+                )
+            } else if (!prefs.showGreeting) {
                 Spacer(Modifier.height(20.dp))
             }
 
-            HomeSearchBar(
-                engineName = engineName,
-                onSubmit = onNavigate,
-                modifier = Modifier
-                    .padding(top = if (showClock) 22.dp else 6.dp)
-                    .padding(horizontal = 16.dp)
-                    .fillMaxWidth()
-            )
+            if (prefs.showSearchBar) {
+                HomeSearchBar(
+                    engineName = engineName,
+                    onSubmit = onNavigate,
+                    cardAlpha = cardAlpha,
+                    modifier = Modifier
+                        .padding(top = if (prefs.showClock || prefs.showGreeting) 22.dp else 6.dp)
+                        .padding(horizontal = 16.dp)
+                        .fillMaxWidth()
+                )
+            }
 
-            ShieldStatsCard(
-                lifetimeBlocked = lifetimeBlocked,
-                onClick = onOpenShield,
-                modifier = Modifier
-                    .padding(top = 16.dp)
-                    .padding(horizontal = 16.dp)
-                    .fillMaxWidth()
-            )
+            if (prefs.showShieldCard) {
+                ShieldStatsCard(
+                    lifetimeBlocked = lifetimeBlocked,
+                    onClick = onOpenShield,
+                    cardAlpha = cardAlpha,
+                    modifier = Modifier
+                        .padding(top = 16.dp)
+                        .padding(horizontal = 16.dp)
+                        .fillMaxWidth()
+                )
+            }
 
-            if (showShortcuts) {
+            if (prefs.showShortcuts) {
                 ShortcutsCard(
                     sites = recentSites,
                     onNavigate = onNavigate,
+                    style = prefs.tileStyle,
+                    count = prefs.tileCount,
+                    showLabels = prefs.tileLabels,
+                    cardAlpha = cardAlpha,
                     modifier = Modifier
                         .padding(top = 16.dp)
                         .fillMaxWidth()
@@ -131,42 +158,73 @@ fun NewTabPage(
     }
 }
 
+@Composable
+private fun HomeGreeting(name: String, modifier: Modifier = Modifier) {
+    val hour = remember { java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY) }
+    val base = when (hour) {
+        in 5..11 -> "Good morning"
+        in 12..16 -> "Good afternoon"
+        in 17..20 -> "Good evening"
+        else -> "Good night"
+    }
+    val text = if (name.isBlank()) base else "$base, ${name.trim()}"
+    Text(
+        text = text,
+        color = Color.White.copy(alpha = 0.95f),
+        fontSize = 20.sp,
+        fontWeight = FontWeight.Medium,
+        modifier = modifier
+    )
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Live clock + date
 // ─────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun HomeClock(modifier: Modifier = Modifier) {
-    // Ticks once a second while the page is visible; stops automatically when
-    // the composable leaves the screen (LaunchedEffect is cancelled).
+private fun HomeClock(
+    is24h: Boolean,
+    sizeSp: Int,
+    showDate: Boolean,
+    modifier: Modifier = Modifier
+) {
+    // Ticks ONCE A MINUTE (aligned to the minute boundary), not every second:
+    // the display has no seconds, so a per-second tick was 59 useless
+    // recompositions per minute. Cancelled automatically when the page is hidden.
     var now by remember { mutableStateOf(java.util.Date()) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
         while (true) {
             now = java.util.Date()
-            kotlinx.coroutines.delay(1000L - (System.currentTimeMillis() % 1000L))
+            val ms = System.currentTimeMillis()
+            kotlinx.coroutines.delay(60_000L - (ms % 60_000L) + 50L)
         }
     }
-    val timeText = java.text.SimpleDateFormat("h:mm", java.util.Locale.getDefault()).format(now)
-    val ampm = java.text.SimpleDateFormat("a", java.util.Locale.getDefault()).format(now)
-    val dateText = java.text.SimpleDateFormat("EEEE, d MMMM", java.util.Locale.getDefault()).format(now)
+    val locale = java.util.Locale.getDefault()
+    val timeText = java.text.SimpleDateFormat(if (is24h) "HH:mm" else "h:mm", locale).format(now)
+    val ampm = if (is24h) "" else java.text.SimpleDateFormat("a", locale).format(now).lowercase()
+    val dateText = java.text.SimpleDateFormat("EEEE, d MMMM", locale).format(now)
 
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Row(verticalAlignment = Alignment.Bottom) {
             Text(
                 timeText,
                 color = Color.White,
-                fontSize = 64.sp,
+                fontSize = sizeSp.sp,
                 fontWeight = FontWeight.Light,
                 letterSpacing = (-1).sp
             )
-            Text(
-                ampm.lowercase(),
-                color = Color.White.copy(alpha = 0.85f),
-                fontSize = 20.sp,
-                modifier = Modifier.padding(start = 6.dp, bottom = 12.dp)
-            )
+            if (ampm.isNotEmpty()) {
+                Text(
+                    ampm,
+                    color = Color.White.copy(alpha = 0.85f),
+                    fontSize = (sizeSp * 0.31f).sp,
+                    modifier = Modifier.padding(start = 6.dp, bottom = (sizeSp * 0.19f).dp)
+                )
+            }
         }
-        Text(dateText, color = Color.White.copy(alpha = 0.85f), fontSize = 15.sp)
+        if (showDate) {
+            Text(dateText, color = Color.White.copy(alpha = 0.85f), fontSize = 15.sp)
+        }
     }
 }
 
@@ -178,6 +236,7 @@ private fun HomeClock(modifier: Modifier = Modifier) {
 private fun HomeSearchBar(
     engineName: String,
     onSubmit: (String) -> Unit,
+    cardAlpha: Float,
     modifier: Modifier = Modifier
 ) {
     var text by remember { mutableStateOf("") }
@@ -195,7 +254,7 @@ private fun HomeSearchBar(
     Surface(
         modifier = modifier.height(54.dp),
         shape = RoundedCornerShape(27.dp),
-        color = Color.Black.copy(alpha = 0.46f),
+        color = Color.Black.copy(alpha = (cardAlpha + 0.06f).coerceIn(0f, 0.9f)),
         border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.18f))
     ) {
         Row(
@@ -266,12 +325,13 @@ private fun HomeSearchBar(
 private fun ShieldStatsCard(
     lifetimeBlocked: Int,
     onClick: () -> Unit,
+    cardAlpha: Float,
     modifier: Modifier = Modifier
 ) {
     Surface(
         modifier = modifier.clickable(onClick = onClick),
         shape = RoundedCornerShape(20.dp),
-        color = Color.Black.copy(alpha = 0.40f)
+        color = Color.Black.copy(alpha = cardAlpha)
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
@@ -336,9 +396,13 @@ private data class ShortcutItem(val label: String, val url: String, val tint: Co
 private fun ShortcutsCard(
     sites: List<String>,
     onNavigate: (String) -> Unit,
+    style: String,
+    count: Int,
+    showLabels: Boolean,
+    cardAlpha: Float,
     modifier: Modifier = Modifier
 ) {
-    val items = remember(sites) {
+    val items = remember(sites, count) {
         val fromHistory = sites.mapNotNull { url ->
             val host = runCatching { java.net.URI(url).host }.getOrNull()
                 ?.removePrefix("www.")?.removePrefix("m.")
@@ -350,20 +414,20 @@ private fun ShortcutsCard(
             .filter { d -> fromHistory.none { it.label.equals(d.label, ignoreCase = true) } }
             .map { ShortcutItem(it.label, it.url, it.tint) }
 
-        (fromHistory + fillers).take(10)
+        (fromHistory + fillers).take(count)
     }
 
     Surface(
         modifier = modifier.padding(horizontal = 10.dp),
         shape = RoundedCornerShape(20.dp),
-        color = Color.Black.copy(alpha = 0.40f)
+        color = Color.Black.copy(alpha = cardAlpha)
     ) {
         LazyRow(
             contentPadding = PaddingValues(horizontal = 6.dp, vertical = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             items(items, key = { it.url }) { item ->
-                ShortcutTile(item = item, onClick = { onNavigate(item.url) })
+                ShortcutTile(item = item, style = style, showLabel = showLabels, onClick = { onNavigate(item.url) })
             }
         }
     }
@@ -378,7 +442,17 @@ private fun tintFor(host: String): Color {
 }
 
 @Composable
-private fun ShortcutTile(item: ShortcutItem, onClick: () -> Unit) {
+private fun ShortcutTile(item: ShortcutItem, style: String, showLabel: Boolean, onClick: () -> Unit) {
+    val outer = when (style) {
+        "SQUARE" -> RoundedCornerShape(6.dp)
+        "ROUNDED" -> RoundedCornerShape(18.dp)
+        else -> CircleShape
+    }
+    val inner = when (style) {
+        "SQUARE" -> RoundedCornerShape(4.dp)
+        "ROUNDED" -> RoundedCornerShape(11.dp)
+        else -> CircleShape
+    }
     Column(
         modifier = Modifier
             .width(86.dp)
@@ -387,12 +461,12 @@ private fun ShortcutTile(item: ShortcutItem, onClick: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Surface(
-            shape = CircleShape,
+            shape = outer,
             color = Color.White.copy(alpha = 0.16f),
             modifier = Modifier.size(60.dp)
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Surface(shape = CircleShape, color = item.tint, modifier = Modifier.size(34.dp)) {
+                Surface(shape = inner, color = item.tint, modifier = Modifier.size(34.dp)) {
                     Box(contentAlignment = Alignment.Center) {
                         Text(
                             text = item.label.take(1).uppercase(),
@@ -404,16 +478,18 @@ private fun ShortcutTile(item: ShortcutItem, onClick: () -> Unit) {
                 }
             }
         }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = item.label,
-            color = Color.White,
-            fontSize = 13.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(horizontal = 4.dp)
-        )
+        if (showLabel) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = item.label,
+                color = Color.White,
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 4.dp)
+            )
+        }
     }
 }
 

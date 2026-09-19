@@ -32,3 +32,10 @@
 -keepclassmembers class com.astra.browser.core.media.MediaPlaybackBridge$JsInterface {
     @android.webkit.JavascriptInterface <methods>;
 }
+
+# Keep every @JavascriptInterface method on ANY class (obfuscation would rename
+# them and the page could no longer call them in release builds).
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
+-keep class com.astra.browser.core.engine.PageScripts { *; }

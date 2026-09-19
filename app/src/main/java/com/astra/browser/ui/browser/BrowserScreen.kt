@@ -29,6 +29,7 @@ import com.astra.browser.ui.browser.components.FindInPageBar
 import com.astra.browser.ui.browser.components.ShieldSheet
 import com.astra.browser.privacy.blocker.ContentBlocker
 import com.astra.browser.ui.newtab.NewTabPage
+import com.astra.browser.ui.prefs.LocalUiPrefs
 
 @Composable
 fun BrowserScreen(
@@ -116,65 +117,85 @@ fun BrowserScreen(
         addressBarText = activeTab?.url ?: ""
     }
 
+    val urlBarBottom = LocalUiPrefs.current.urlBarBottom
+
+    // The whole address-bar block (toolbar + load progress + find-in-page) is
+    // built once and placed either in the top slot or the bottom slot, so both
+    // layouts share exactly the same code and behaviour.
+    val addressBlock: @Composable () -> Unit = {
+        AstraToolbar(
+            addressText = if (activeTab?.isBlankTab != false) "" else addressBarText,
+            onAddressChange = { addressBarText = it },
+            onAddressFocusChange = { isAddressBarFocused = it },
+            isSecure = activeTab?.isSecure ?: false,
+            isLoading = activeTab?.isLoading ?: false,
+            isBookmarked = activeTab?.isBookmarked ?: false,
+            isPrivate = activeTab?.isPrivate ?: false,
+            isHome = activeTab == null || activeTab.isBlankTab,
+            onNavigate = { input ->
+                activeTab?.let { tab -> viewModel.navigate(tab.id, input) }
+            },
+            onReloadOrStop = {
+                activeTab?.let { tab ->
+                    if (tab.isLoading) viewModel.tabManager.getWebView(tab.id)?.stopLoading()
+                    else viewModel.reload(tab.id)
+                }
+            },
+            onBookmarkToggle = { activeTab?.let { viewModel.toggleBookmark(it.id) } },
+            onBookmarksOpen = { navController.navigate(AstraRoutes.BOOKMARKS) },
+            onShieldClick = { showShield = true },
+            blockedCount = tabStats.blocked,
+            shieldOn = (adBlockingOn || trackingOn) && siteShieldOn,
+            focusRequestKey = searchFocusKey
+        )
+        if (activeTab?.isLoading == true) {
+            LinearProgressIndicator(
+                progress = { (activeTab.loadProgress / 100f).coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().height(2.dp),
+                color = colors.accent,
+                trackColor = Color.Transparent
+            )
+        }
+        if (showFindInPage) {
+            FindInPageBar(
+                webView = activeTab?.let { viewModel.tabManager.getWebView(it.id) },
+                onClose = { showFindInPage = false }
+            )
+        }
+    }
+
+    val navBar: @Composable () -> Unit = {
+        BraveBottomBar(
+            tabCount = tabs.size,
+            isPrivate = activeTab?.isPrivate ?: false,
+            onHome = { activeTab?.let { viewModel.goHome(it.id) } },
+            onBookmarks = { navController.navigate(AstraRoutes.BOOKMARKS) },
+            onSearch = { searchFocusKey++ },
+            onTabs = { navController.navigate(AstraRoutes.TAB_SWITCHER) },
+            onMenu = { showBrowserMenu = true }
+        )
+    }
+
     Scaffold(
         containerColor = colors.background,
+        // imePadding on the bottom slot so the address bar rides above the
+        // keyboard when it is at the bottom.
         topBar = {
-            Column(modifier = Modifier.statusBarsPadding()) {
-                AstraToolbar(
-                    addressText = if (activeTab?.isBlankTab != false) "" else addressBarText,
-                    onAddressChange = { addressBarText = it },
-                    onAddressFocusChange = { isAddressBarFocused = it },
-                    isSecure = activeTab?.isSecure ?: false,
-                    isLoading = activeTab?.isLoading ?: false,
-                    isBookmarked = activeTab?.isBookmarked ?: false,
-                    isPrivate = activeTab?.isPrivate ?: false,
-                    isHome = activeTab == null || activeTab.isBlankTab,
-                    onNavigate = { input ->
-                        activeTab?.let { tab -> viewModel.navigate(tab.id, input) }
-                    },
-                    onReloadOrStop = {
-                        activeTab?.let { tab ->
-                            if (tab.isLoading) viewModel.tabManager.getWebView(tab.id)?.stopLoading()
-                            else viewModel.reload(tab.id)
-                        }
-                    },
-                    onBookmarkToggle = { activeTab?.let { viewModel.toggleBookmark(it.id) } },
-                    onBookmarksOpen = { navController.navigate(AstraRoutes.BOOKMARKS) },
-                    onShieldClick = { showShield = true },
-                    blockedCount = tabStats.blocked,
-                    shieldOn = (adBlockingOn || trackingOn) && siteShieldOn,
-                    focusRequestKey = searchFocusKey
-                )
-                if (activeTab?.isLoading == true) {
-                    LinearProgressIndicator(
-                        progress = { (activeTab.loadProgress / 100f).coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth().height(2.dp),
-                        color = colors.accent,
-                        trackColor = Color.Transparent
-                    )
-                }
-                if (showFindInPage) {
-                    FindInPageBar(
-                        webView = activeTab?.let { viewModel.tabManager.getWebView(it.id) },
-                        onClose = { showFindInPage = false }
-                    )
-                }
+            if (urlBarBottom) {
+                Spacer(Modifier.statusBarsPadding())
+            } else {
+                Column(modifier = Modifier.statusBarsPadding()) { addressBlock() }
             }
         },
         bottomBar = {
-            BraveBottomBar(
-                tabCount = tabs.size,
-                isPrivate = activeTab?.isPrivate ?: false,
-                onHome = {
-                    // Home = go to the Astra start page in the current tab.
-                    // The tab keeps its history, we just show the NTP again.
-                    activeTab?.let { viewModel.goHome(it.id) }
-                },
-                onBookmarks = { navController.navigate(AstraRoutes.BOOKMARKS) },
-                onSearch = { searchFocusKey++ },
-                onTabs = { navController.navigate(AstraRoutes.TAB_SWITCHER) },
-                onMenu = { showBrowserMenu = true }
-            )
+            if (urlBarBottom) {
+                Column(modifier = Modifier.imePadding()) {
+                    addressBlock()
+                    navBar()
+                }
+            } else {
+                navBar()
+            }
         }
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {

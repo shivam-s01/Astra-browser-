@@ -54,38 +54,32 @@ class AstraWebViewClient(
 
         // Install media hooks as early as possible; YouTube-style SPAs never
         // fire a full page load again after the first one.
+        // A fresh page starts with window.__astra at its built-in defaults;
+        // push the user's real settings in straight away so a page loaded
+        // while "Play in background" / "Skip YouTube ads" is OFF is never
+        // spoofed or stripped.
+        tabManager.pushFlags(view)
         installMediaWatcher(view)
         applyDesktopViewport(view)
+        injectCosmeticFilter(view, url)
     }
 
     /**
-     * Real "Desktop site": a desktop UA alone is not enough, because most
-     * modern pages ship <meta name="viewport" content="width=device-width"> and
-     * keep their mobile layout regardless. In desktop mode we rewrite that
-     * meta to a fixed 1024px width so the page lays out as a desktop page and
-     * WebView zooms it out to fit (overview mode).
+     * Real "Desktop site". The UA string + WebView settings are switched in
+     * AstraWebViewHost; here we only flip the per-page flag that the
+     * document-start viewport script (PageScripts.DESKTOP_VIEWPORT_JS) reads.
+     * No MutationObserver over the whole DOM any more -- that re-ran on every
+     * DOM change of heavy pages and was a real source of heat.
      */
     private fun applyDesktopViewport(view: WebView) {
         val desktop = tabManager.tabs.value.firstOrNull { it.id == tabId }?.desktopSiteEnabled == true
-        if (!desktop) return
-        view.evaluateJavascript(
-            """
-            (function() {
-                function fix() {
-                    var m = document.querySelector('meta[name=viewport]');
-                    if (!m) {
-                        m = document.createElement('meta');
-                        m.name = 'viewport';
-                        (document.head || document.documentElement).appendChild(m);
-                    }
-                    m.setAttribute('content', 'width=1024, initial-scale=0.1, minimum-scale=0.1, maximum-scale=5, user-scalable=yes');
-                }
-                fix();
-                new MutationObserver(fix).observe(document.documentElement, { childList: true, subtree: true });
-            })();
-            """.trimIndent(),
-            null
-        )
+        tabManager.setDesktopFlag(view, desktop)
+        if (desktop) {
+            view.evaluateJavascript(
+                "window.dispatchEvent(new Event('load'))&&0;",
+                null
+            )
+        }
     }
 
     override fun onPageFinished(view: WebView, url: String) {
@@ -153,29 +147,26 @@ class AstraWebViewClient(
             (function() {
                 if (window.__astraMediaWatcherInstalled) return;
                 window.__astraMediaWatcherInstalled = true;
+                var last = null;
                 function report() {
                     var playing = false;
-                    document.querySelectorAll('video, audio').forEach(function(el) {
-                        if (!el.paused && !el.ended && el.readyState > 2) playing = true;
-                    });
-                    try { AstraMedia.onPlaybackState(playing); } catch (e) {}
+                    var els = document.getElementsByTagName('video');
+                    for (var i = 0; i < els.length; i++) { var e = els[i]; if (!e.paused && !e.ended && e.readyState > 2) { playing = true; break; } }
+                    if (!playing) {
+                        els = document.getElementsByTagName('audio');
+                        for (var j = 0; j < els.length; j++) { var a = els[j]; if (!a.paused && !a.ended && a.readyState > 2) { playing = true; break; } }
+                    }
+                    if (playing !== last) { last = playing; try { AstraMedia.onPlaybackState(playing); } catch (e) {} }
                 }
-                function attach(el) {
-                    if (el.__astraAttached) return;
-                    el.__astraAttached = true;
-                    ['play','playing','pause','ended','emptied','waiting'].forEach(function(ev) {
-                        el.addEventListener(ev, report, true);
-                    });
-                }
-                document.querySelectorAll('video, audio').forEach(attach);
-                new MutationObserver(function(mutations) {
-                    mutations.forEach(function(m) {
-                        m.addedNodes && m.addedNodes.forEach(function(node) {
-                            if (node.tagName === 'VIDEO' || node.tagName === 'AUDIO') attach(node);
-                            if (node.querySelectorAll) node.querySelectorAll('video, audio').forEach(attach);
-                        });
-                    });
-                }).observe(document.documentElement, { childList: true, subtree: true });
+                // Media events do not bubble, but they DO propagate in the capture phase
+                // from document: ONE listener per event type covers every current and
+                // future <video>/<audio>. No MutationObserver, no per-element wiring.
+                ['play','playing','pause','ended','emptied','waiting','stalled'].forEach(function(ev) {
+                    document.addEventListener(ev, function(e) {
+                        var t = e.target && e.target.tagName;
+                        if (t === 'VIDEO' || t === 'AUDIO') report();
+                    }, true);
+                });
                 report();
             })();
             """.trimIndent(),

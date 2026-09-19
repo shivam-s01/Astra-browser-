@@ -75,6 +75,7 @@ fun AstraWebViewHost(
                 val previousMode = webView.getTag(DESKTOP_TAG) as? Boolean
                 settings_applyDesktopMode(webView, tab.desktopSiteEnabled)
                 if (previousMode != null && previousMode != tab.desktopSiteEnabled) {
+                    tabManager.setDesktopFlag(webView, tab.desktopSiteEnabled)
                     webView.reload()
                 }
                 webView.setTag(DESKTOP_TAG, tab.desktopSiteEnabled)
@@ -116,20 +117,18 @@ private fun settings_applyDesktopMode(webView: android.webkit.WebView, desktop: 
     val settings = webView.settings
     if (desktop) {
         settings.userAgentString = DESKTOP_USER_AGENT
-        // Desktop layout: ignore the page's mobile viewport and lay it out at
-        // a desktop width, zoomed out to fit, like a real desktop browser.
         settings.useWideViewPort = true
         settings.loadWithOverviewMode = true
         settings.setSupportZoom(true)
         settings.builtInZoomControls = true
         settings.displayZoomControls = false
         settings.layoutAlgorithm = android.webkit.WebSettings.LayoutAlgorithm.NORMAL
+        // Desktop pages ask for hover/mouse features; without this some sites
+        // still serve a "mobile" widget set even with a desktop UA.
+        webView.setInitialScale(0)
     } else {
-        // Android WebView's actual default UA includes a "; wv)" token that
-        // marks the request as an embedded WebView rather than a real browser.
-        // Many sites serve a stripped page or an "open in app" nag for it.
-        // Stripping it (as Chrome-derived browsers like Brave do) makes every
-        // site treat Astra as normal mobile Chrome.
+        // Android WebView's default UA has a "; wv)" token that marks the request as an
+        // embedded WebView -- many sites then serve a stripped page. Strip it.
         val default = settings.userAgentString
         settings.userAgentString = default
             ?.replace("; wv)", ")")
@@ -137,8 +136,9 @@ private fun settings_applyDesktopMode(webView: android.webkit.WebView, desktop: 
             ?: default
         settings.useWideViewPort = true
         settings.loadWithOverviewMode = true
+        webView.setInitialScale(0)
     }
 }
 
 private const val DESKTOP_USER_AGENT =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"

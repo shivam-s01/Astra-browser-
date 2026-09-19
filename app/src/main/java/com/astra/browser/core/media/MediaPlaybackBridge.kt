@@ -109,7 +109,13 @@ class BackgroundPlaybackController @Inject constructor(
         scope.launch {
             settingsStore.backgroundPlayback.distinctUntilChanged().collect { enabled ->
                 bridge.setKeepPlayingInBackground(enabled)
+                // Push the new flag into every already-open page right away.
+                tabManager.onBackgroundPlaybackChanged()
             }
+        }
+
+        scope.launch {
+            settingsStore.ytAdSkip.distinctUntilChanged().collect { tabManager.ytAdSkipEnabled = it }
         }
 
         scope.launch {
