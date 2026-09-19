@@ -10,6 +10,7 @@ import com.astra.browser.ui.downloads.DownloadsScreen
 import com.astra.browser.ui.history.HistoryScreen
 import com.astra.browser.ui.privacy.PrivacyDashboardScreen
 import com.astra.browser.ui.settings.SettingsScreen
+import com.astra.browser.ui.settings.WallpaperScreen
 import com.astra.browser.ui.tabswitcher.TabSwitcherScreen
 
 object AstraRoutes {
@@ -20,6 +21,7 @@ object AstraRoutes {
     const val DOWNLOADS = "downloads"
     const val SETTINGS = "settings"
     const val PRIVACY_DASHBOARD = "privacy_dashboard"
+    const val WALLPAPER = "wallpaper"
 }
 
 @Composable
@@ -47,6 +49,9 @@ fun AstraApp() {
         }
         composable(AstraRoutes.PRIVACY_DASHBOARD) {
             PrivacyDashboardScreen(navController = navController)
+        }
+        composable(AstraRoutes.WALLPAPER) {
+            WallpaperScreen(navController = navController)
         }
     }
 }

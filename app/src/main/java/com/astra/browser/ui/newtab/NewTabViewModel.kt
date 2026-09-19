@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.astra.browser.data.repository.HistoryRepository
 import com.astra.browser.data.store.SettingsStore
+import com.astra.browser.data.store.WallpaperStore
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.map
@@ -13,7 +14,8 @@ import javax.inject.Inject
 @HiltViewModel
 class NewTabViewModel @Inject constructor(
     historyRepository: HistoryRepository,
-    settingsStore: SettingsStore
+    settingsStore: SettingsStore,
+    wallpaperStore: WallpaperStore
 ) : ViewModel() {
 
     val recentSites = historyRepository.observeAll()
@@ -25,4 +27,12 @@ class NewTabViewModel @Inject constructor(
 
     val showShortcuts = settingsStore.showShortcuts
         .stateIn(viewModelScope, SharingStarted.Eagerly, true)
+
+    val wallpaperMode = settingsStore.wallpaperMode
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "NIGHT_SKY")
+
+    val wallpaperDim = settingsStore.wallpaperDim
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 0f)
+
+    val customWallpaper = wallpaperStore.custom
 }

@@ -215,6 +215,55 @@ class BrowserViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Show the Astra start page again in this tab (Brave's Home button).
+     * Stops any in-flight load FIRST (otherwise onPageStarted would flip
+     * isBlankTab back to false and bounce the user straight back to the
+     * page), then flips only isBlankTab. The tab's url and the WebView's own
+     * history are deliberately left alone so Back/Forward keep working.
+     */
+    fun goHome(tabId: String) {
+        tabManager.getWebView(tabId)?.stopLoading()
+        tabManager.updateTab(tabId) {
+            it.copy(isBlankTab = true, isLoading = false, loadProgress = 0)
+        }
+    }
+
+    /**
+     * Back / Forward / Reload from anywhere (system back, menu quick-actions).
+     * If the user is on the Astra start page (isBlankTab) while the tab still
+     * has a real page underneath, these must FIRST bring that page back on
+     * screen -- otherwise the WebView navigates invisibly and the user just
+     * keeps seeing the start page, i.e. "Back does nothing".
+     */
+    private fun showPageIfHome(tabId: String) {
+        val tab = tabManager.tabs.value.find { it.id == tabId } ?: return
+        if (tab.isBlankTab && tab.url.isNotBlank()) {
+            tabManager.updateTab(tabId) { it.copy(isBlankTab = false) }
+        }
+    }
+
+    fun goBack(tabId: String) {
+        val tab = tabManager.tabs.value.find { it.id == tabId } ?: return
+        // On the start page with a page hidden underneath: first Back just
+        // reveals that page (like Brave), it does not skip past it.
+        if (tab.isBlankTab && tab.url.isNotBlank()) {
+            showPageIfHome(tabId)
+        } else {
+            tabManager.getWebView(tabId)?.goBack()
+        }
+    }
+
+    fun goForward(tabId: String) {
+        showPageIfHome(tabId)
+        tabManager.getWebView(tabId)?.goForward()
+    }
+
+    fun reload(tabId: String) {
+        showPageIfHome(tabId)
+        tabManager.getWebView(tabId)?.reload()
+    }
+
     fun toggleDesktopSite(tabId: String) {
         tabManager.updateTab(tabId) { it.copy(desktopSiteEnabled = !it.desktopSiteEnabled) }
     }

@@ -19,6 +19,8 @@ import com.astra.browser.data.store.SettingsStore
 import com.astra.browser.domain.model.SearchEngine
 import com.astra.browser.theme.AstraThemeId
 import com.astra.browser.theme.LocalAstraColors
+import com.astra.browser.ui.AstraRoutes
+import com.astra.browser.ui.newtab.WallpaperModes
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
@@ -43,6 +45,7 @@ class SettingsViewModel @Inject constructor(private val store: SettingsStore) : 
     val reducedMotion = store.reducedMotion.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val textScale = store.textScale.stateIn(viewModelScope, SharingStarted.Eagerly, 1.0f)
     val backgroundPlayback = store.backgroundPlayback.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val wallpaperMode = store.wallpaperMode.stateIn(viewModelScope, SharingStarted.Eagerly, "NIGHT_SKY")
 
     fun setHomepage(v: String) = viewModelScope.launch { store.setHomepage(v) }
     fun setSearchEngine(v: String) = viewModelScope.launch { store.setSearchEngine(v) }
@@ -137,6 +140,15 @@ fun SettingsScreen(navController: NavController, viewModel: SettingsViewModel = 
                     selected = theme,
                     onSelect = viewModel::setThemeId
                 )
+            }
+            item {
+                val wallpaper by viewModel.wallpaperMode.collectAsState()
+                SettingRow(
+                    title = "Home wallpaper",
+                    subtitle = WallpaperModes.label(wallpaper) + "  ·  Pick from gallery or choose a preset"
+                ) {
+                    navController.navigate(AstraRoutes.WALLPAPER)
+                }
             }
 
             item { SectionHeader("Tabs") }

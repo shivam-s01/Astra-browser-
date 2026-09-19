@@ -23,6 +23,7 @@ import androidx.navigation.NavController
 import com.astra.browser.theme.LocalAstraColors
 import com.astra.browser.ui.AstraRoutes
 import com.astra.browser.ui.browser.components.AstraWebViewHost
+import com.astra.browser.ui.browser.components.BraveBottomBar
 import com.astra.browser.ui.browser.components.BrowserMenu
 import com.astra.browser.ui.browser.components.FindInPageBar
 import com.astra.browser.ui.newtab.NewTabPage
@@ -41,6 +42,7 @@ fun BrowserScreen(
     var isAddressBarFocused by remember { mutableStateOf(false) }
     var showBrowserMenu by remember { mutableStateOf(false) }
     var showFindInPage by remember { mutableStateOf(false) }
+    var searchFocusKey by remember { mutableStateOf(0) }
     val fullscreenView by viewModel.fullscreenView.collectAsState()
 
     BackHandler(enabled = fullscreenView != null) {
@@ -65,11 +67,14 @@ fun BrowserScreen(
     //   5. Nothing left to step back through -> let the system handle it
     //      (backgrounds/exits the app normally). BackHandler is simply
     //      disabled in that case so this falls through to default behavior.
-    val canStepBackInPage = activeTab?.canGoBack == true
+    // A tab sitting on the Astra start page (Home pressed) still has a page
+    // underneath, so Back must be able to bring it back too.
+    val hiddenPageBehindHome = activeTab != null && activeTab.isBlankTab && activeTab.url.isNotBlank()
+    val canStepBackInPage = activeTab?.canGoBack == true || hiddenPageBehindHome
     BackHandler(enabled = fullscreenView == null && (showFindInPage || canStepBackInPage)) {
         when {
             showFindInPage -> showFindInPage = false
-            canStepBackInPage -> activeTab?.let { viewModel.tabManager.getWebView(it.id)?.goBack() }
+            canStepBackInPage -> activeTab?.let { viewModel.goBack(it.id) }
         }
     }
 
@@ -86,35 +91,38 @@ fun BrowserScreen(
         if (!isAddressBarFocused) addressBarText = activeTab?.url ?: ""
     }
 
+    // Toggling between the start page and a real page (Home / Back) must reset
+    // the address text, otherwise anything typed on the start page and never
+    // submitted would stick around in the bar when the page comes back.
+    LaunchedEffect(activeTab?.isBlankTab) {
+        addressBarText = activeTab?.url ?: ""
+    }
+
     Scaffold(
         containerColor = colors.background,
         topBar = {
             Column(modifier = Modifier.statusBarsPadding()) {
                 AstraToolbar(
-                    addressText = addressBarText,
+                    addressText = if (activeTab?.isBlankTab != false) "" else addressBarText,
                     onAddressChange = { addressBarText = it },
                     onAddressFocusChange = { isAddressBarFocused = it },
                     isSecure = activeTab?.isSecure ?: false,
                     isLoading = activeTab?.isLoading ?: false,
                     isBookmarked = activeTab?.isBookmarked ?: false,
                     isPrivate = activeTab?.isPrivate ?: false,
-                    canGoBack = activeTab?.canGoBack ?: false,
-                    canGoForward = activeTab?.canGoForward ?: false,
-                    tabCount = tabs.size,
+                    isHome = activeTab == null || activeTab.isBlankTab,
                     onNavigate = { input ->
                         activeTab?.let { tab -> viewModel.navigate(tab.id, input) }
                     },
-                    onBack = { activeTab?.let { viewModel.tabManager.getWebView(it.id)?.goBack() } },
-                    onForward = { activeTab?.let { viewModel.tabManager.getWebView(it.id)?.goForward() } },
                     onReloadOrStop = {
                         activeTab?.let { tab ->
-                            val webView = viewModel.tabManager.getWebView(tab.id)
-                            if (tab.isLoading) webView?.stopLoading() else webView?.reload()
+                            if (tab.isLoading) viewModel.tabManager.getWebView(tab.id)?.stopLoading()
+                            else viewModel.reload(tab.id)
                         }
                     },
                     onBookmarkToggle = { activeTab?.let { viewModel.toggleBookmark(it.id) } },
-                    onTabSwitcherClick = { navController.navigate(AstraRoutes.TAB_SWITCHER) },
-                    onMenuClick = { showBrowserMenu = true }
+                    onBookmarksOpen = { navController.navigate(AstraRoutes.BOOKMARKS) },
+                    focusRequestKey = searchFocusKey
                 )
                 if (activeTab?.isLoading == true) {
                     LinearProgressIndicator(
@@ -131,6 +139,21 @@ fun BrowserScreen(
                     )
                 }
             }
+        },
+        bottomBar = {
+            BraveBottomBar(
+                tabCount = tabs.size,
+                isPrivate = activeTab?.isPrivate ?: false,
+                onHome = {
+                    // Home = go to the Astra start page in the current tab.
+                    // The tab keeps its history, we just show the NTP again.
+                    activeTab?.let { viewModel.goHome(it.id) }
+                },
+                onBookmarks = { navController.navigate(AstraRoutes.BOOKMARKS) },
+                onSearch = { searchFocusKey++ },
+                onTabs = { navController.navigate(AstraRoutes.TAB_SWITCHER) },
+                onMenu = { showBrowserMenu = true }
+            )
         }
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
@@ -166,7 +189,11 @@ fun BrowserScreen(
             onFindInPage = { showFindInPage = true; showBrowserMenu = false },
             onDesktopSite = { activeTab?.let { viewModel.toggleDesktopSite(it.id) }; showBrowserMenu = false },
             onSettings = { navController.navigate(AstraRoutes.SETTINGS); showBrowserMenu = false },
-            onPrivacyDashboard = { navController.navigate(AstraRoutes.PRIVACY_DASHBOARD); showBrowserMenu = false }
+            onPrivacyDashboard = { navController.navigate(AstraRoutes.PRIVACY_DASHBOARD); showBrowserMenu = false },
+            onBack = { activeTab?.let { viewModel.goBack(it.id) }; showBrowserMenu = false },
+            onForward = { activeTab?.let { viewModel.goForward(it.id) }; showBrowserMenu = false },
+            onReload = { activeTab?.let { viewModel.reload(it.id) }; showBrowserMenu = false },
+            onBookmarkToggle = { activeTab?.let { viewModel.toggleBookmark(it.id) }; showBrowserMenu = false }
         )
     }
 

@@ -1,6 +1,7 @@
 package com.astra.browser.ui.browser
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -30,87 +31,102 @@ fun AstraToolbar(
     isLoading: Boolean,
     isBookmarked: Boolean,
     isPrivate: Boolean,
-    canGoBack: Boolean,
-    canGoForward: Boolean,
-    tabCount: Int,
+    isHome: Boolean,
     onNavigate: (String) -> Unit,
-    onBack: () -> Unit,
-    onForward: () -> Unit,
     onReloadOrStop: () -> Unit,
     onBookmarkToggle: () -> Unit,
-    onTabSwitcherClick: () -> Unit,
-    onMenuClick: () -> Unit
+    onBookmarksOpen: () -> Unit,
+    focusRequestKey: Int = 0
 ) {
     val colors = LocalAstraColors.current
 
-    Surface(color = if (isPrivate) colors.surfaceVariant else colors.toolbar, shadowElevation = 1.dp) {
+    // Brave layout: [ URL pill (site icon . field . shield) ]  [ bookmark ]
+    Surface(color = if (isPrivate) colors.surfaceVariant else colors.toolbar) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 8.dp),
+                .padding(start = 10.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            IconButton(onClick = onBack, enabled = canGoBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back",
-                    tint = if (canGoBack) colors.onSurface else colors.onSurface.copy(alpha = 0.3f))
-            }
-            IconButton(onClick = onForward, enabled = canGoForward) {
-                Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Forward",
-                    tint = if (canGoForward) colors.onSurface else colors.onSurface.copy(alpha = 0.3f))
-            }
-
             Surface(
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(20.dp),
+                modifier = Modifier.weight(1f).height(48.dp),
+                shape = RoundedCornerShape(14.dp),
                 color = colors.surfaceVariant
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    modifier = Modifier.padding(start = 10.dp, end = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Icon(
-                        imageVector = if (isSecure) Icons.Filled.Lock else Icons.Filled.Info,
-                        contentDescription = if (isSecure) "Secure connection" else "Not secure",
-                        tint = if (isSecure) colors.accent else colors.onSurface.copy(alpha = 0.5f),
-                        modifier = Modifier.size(16.dp)
-                    )
+                    SiteBadge(isHome = isHome, isSecure = isSecure)
                     AstraAddressField(
                         value = addressText,
                         onValueChange = onAddressChange,
                         onFocusChange = onAddressFocusChange,
                         onSubmit = { onNavigate(addressText) },
+                        focusRequestKey = focusRequestKey,
                         modifier = Modifier.weight(1f)
                     )
-                    if (addressText.isNotBlank()) {
-                        IconButton(onClick = onBookmarkToggle, modifier = Modifier.size(24.dp)) {
+                    if (!isHome && addressText.isNotBlank()) {
+                        IconButton(onClick = onReloadOrStop, modifier = Modifier.size(32.dp)) {
                             Icon(
-                                imageVector = if (isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
-                                contentDescription = "Bookmark",
-                                tint = if (isBookmarked) colors.accent else colors.onSurface.copy(alpha = 0.6f),
+                                imageVector = if (isLoading) Icons.Filled.Close else Icons.Filled.Refresh,
+                                contentDescription = if (isLoading) "Stop" else "Reload",
+                                tint = colors.onSurface.copy(alpha = 0.7f),
                                 modifier = Modifier.size(18.dp)
                             )
                         }
                     }
+                    ShieldBadge()
                 }
             }
 
-            IconButton(onClick = onReloadOrStop) {
+            // Bookmark: on a page it toggles the bookmark; on home it opens the list
+            IconButton(onClick = if (isHome) onBookmarksOpen else onBookmarkToggle) {
                 Icon(
-                    imageVector = if (isLoading) Icons.Filled.Close else Icons.Filled.Refresh,
-                    contentDescription = if (isLoading) "Stop" else "Reload",
-                    tint = colors.onSurface
+                    imageVector = if (isBookmarked && !isHome) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
+                    contentDescription = "Bookmark",
+                    tint = if (isBookmarked && !isHome) colors.accent else colors.onSurface,
+                    modifier = Modifier.size(28.dp)
                 )
-            }
-
-            TabCounterButton(count = tabCount, onClick = onTabSwitcherClick)
-
-            IconButton(onClick = onMenuClick) {
-                Icon(Icons.Filled.MoreVert, contentDescription = "Menu", tint = colors.onSurface)
             }
         }
     }
+}
+
+@Composable
+private fun SiteBadge(isHome: Boolean, isSecure: Boolean) {
+    val colors = LocalAstraColors.current
+    Surface(
+        shape = CircleShape,
+        color = if (isHome) colors.accent.copy(alpha = 0.22f) else Color.Transparent,
+        modifier = Modifier.size(28.dp)
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                imageVector = when {
+                    isHome -> Icons.Filled.Language
+                    isSecure -> Icons.Filled.Lock
+                    else -> Icons.Filled.Info
+                },
+                contentDescription = null,
+                tint = if (isHome || isSecure) colors.accent else colors.onSurface.copy(alpha = 0.6f),
+                modifier = Modifier.size(if (isHome) 18.dp else 16.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ShieldBadge() {
+    val colors = LocalAstraColors.current
+    Icon(
+        imageVector = Icons.Filled.Shield,
+        contentDescription = "Shields",
+        tint = colors.accent,
+        modifier = Modifier.size(28.dp).padding(end = 4.dp)
+    )
 }
 
 /**
@@ -139,10 +155,16 @@ private fun AstraAddressField(
     onValueChange: (String) -> Unit,
     onFocusChange: (Boolean) -> Unit,
     onSubmit: () -> Unit,
+    focusRequestKey: Int = 0,
     modifier: Modifier = Modifier
 ) {
     val colors = LocalAstraColors.current
     val focusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+
+    // Bottom-bar Search button bumps this key -> focus the field + raise keyboard
+    LaunchedEffect(focusRequestKey) {
+        if (focusRequestKey > 0) runCatching { focusRequester.requestFocus() }
+    }
     var isFocused by remember { mutableStateOf(false) }
 
     // Deliberately remember(Unit) -- NOT remember(value). Keying this on
@@ -241,31 +263,3 @@ private fun AstraAddressField(
         }
     }
 }
-
-@Composable
-private fun TabCounterButton(count: Int, onClick: () -> Unit) {
-    val colors = LocalAstraColors.current
-    IconButton(onClick = onClick) {
-        Box(
-            modifier = Modifier.size(24.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Surface(
-                shape = RoundedCornerShape(6.dp),
-                color = Color.Transparent,
-                border = androidx.compose.foundation.BorderStroke(1.5.dp, colors.onSurface),
-                modifier = Modifier.size(22.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Text(
-                        text = if (count > 99) "99+" else count.toString(),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.onSurface
-                    )
-                }
-            }
-        }
-    }
-}
-
-

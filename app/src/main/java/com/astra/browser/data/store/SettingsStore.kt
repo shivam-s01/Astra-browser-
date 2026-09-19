@@ -40,6 +40,9 @@ class SettingsStore @Inject constructor(
         val SHOW_CLOCK = booleanPreferencesKey("show_clock")
         val SHOW_RECENT_SITES = booleanPreferencesKey("show_recent_sites")
         val BACKGROUND_PLAYBACK = booleanPreferencesKey("background_playback")
+        val WALLPAPER_MODE = stringPreferencesKey("wallpaper_mode")
+        val WALLPAPER_VERSION = longPreferencesKey("wallpaper_version")
+        val WALLPAPER_DIM = floatPreferencesKey("wallpaper_dim")
     }
 
     val homepage: Flow<String> = context.dataStore.data.map { it[Keys.HOMEPAGE] ?: "astra://newtab" }
@@ -67,6 +70,9 @@ class SettingsStore @Inject constructor(
     val showClock: Flow<Boolean> = context.dataStore.data.map { it[Keys.SHOW_CLOCK] ?: true }
     val showRecentSites: Flow<Boolean> = context.dataStore.data.map { it[Keys.SHOW_RECENT_SITES] ?: true }
     val backgroundPlayback: Flow<Boolean> = context.dataStore.data.map { it[Keys.BACKGROUND_PLAYBACK] ?: false }
+    val wallpaperMode: Flow<String> = context.dataStore.data.map { it[Keys.WALLPAPER_MODE] ?: "NIGHT_SKY" }
+    val wallpaperVersion: Flow<Long> = context.dataStore.data.map { it[Keys.WALLPAPER_VERSION] ?: 0L }
+    val wallpaperDim: Flow<Float> = context.dataStore.data.map { it[Keys.WALLPAPER_DIM] ?: 0f }
 
     suspend fun setHomepage(value: String) = edit { it[Keys.HOMEPAGE] = value }
     suspend fun setSearchEngine(value: String) = edit { it[Keys.SEARCH_ENGINE] = value }
@@ -97,6 +103,9 @@ class SettingsStore @Inject constructor(
     suspend fun setShowClock(value: Boolean) = edit { it[Keys.SHOW_CLOCK] = value }
     suspend fun setShowRecentSites(value: Boolean) = edit { it[Keys.SHOW_RECENT_SITES] = value }
     suspend fun setBackgroundPlayback(value: Boolean) = edit { it[Keys.BACKGROUND_PLAYBACK] = value }
+    suspend fun setWallpaperMode(value: String) = edit { it[Keys.WALLPAPER_MODE] = value }
+    suspend fun setWallpaperVersion(value: Long) = edit { it[Keys.WALLPAPER_VERSION] = value }
+    suspend fun setWallpaperDim(value: Float) = edit { it[Keys.WALLPAPER_DIM] = value }
 
     suspend fun resetAll() = context.dataStore.edit { it.clear() }
 
