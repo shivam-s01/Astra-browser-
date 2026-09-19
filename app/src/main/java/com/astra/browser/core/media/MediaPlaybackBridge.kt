@@ -54,6 +54,9 @@ class MediaPlaybackBridge @Inject constructor() {
         _isAnyTabPlaying.value = playingTabIds.isNotEmpty()
     }
 
+    /** Used by TabManager to decide which background tabs are safe to pause on a tab switch. */
+    fun isPlaying(tabId: String): Boolean = tabId in playingTabIds
+
     inner class JsInterface(private val tabId: String) {
         @JavascriptInterface
         fun onPlaybackState(isPlaying: Boolean) {
@@ -116,20 +119,52 @@ class BackgroundPlaybackController @Inject constructor(
                 val intent = Intent(context, BackgroundPlaybackService::class.java)
                 if (shouldRun) {
                     intent.putExtra(BackgroundPlaybackService.EXTRA_TITLE, title)
-                    try {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            context.startForegroundService(intent)
-                        } else {
-                            context.startService(intent)
-                        }
-                    } catch (e: Exception) {
-                        // Android 12+ may refuse a foreground-service start
-                        // from the background; never crash over it.
-                    }
+                    startServiceWithRetry(intent)
                 } else {
                     context.stopService(intent)
                 }
             }
+        }
+    }
+
+    /**
+     * The real fix for "song stops the instant you leave the app": the
+     * previous code just swallowed the exception Android 12+ throws when a
+     * foreground service can't be started from the background, so the
+     * service silently never started and nothing kept the WebView's audio
+     * decode alive.
+     *
+     * The play event that flips isAnyTabPlaying=true almost always happens
+     * WHILE the app is foreground (user tapped play), so startForegroundService
+     * succeeds well before the app backgrounds -- as long as we don't lose
+     * that window. If a start is ever rejected anyway (e.g. the flag flips
+     * right as the user is mid-swipe-to-background), retry a few times with
+     * a short backoff instead of giving up on the first attempt; by the
+     * second or third try Android's "recently had a foreground service"
+     * exemption window usually lets it through. Even in the rare case all
+     * retries are exhausted, MainActivity's own onPause/onStop handling
+     * independently keeps the actually-playing WebView alive -- this
+     * service is what adds the notification and wake lock on top, not what
+     * keeps the audio itself running.
+     */
+    private fun startServiceWithRetry(intent: Intent, attempt: Int = 0) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        } catch (e: Exception) {
+            if (attempt < 3) {
+                scope.launch {
+                    kotlinx.coroutines.delay(300L * (attempt + 1))
+                    startServiceWithRetry(intent, attempt + 1)
+                }
+            }
+            // After 3 tries, give up quietly -- the WebView itself is still
+            // kept alive by onAppBackgrounded(keepMediaAlive), so audio
+            // keeps playing even without the notification/wake lock in the
+            // rare case this path is fully exhausted.
         }
     }
 }

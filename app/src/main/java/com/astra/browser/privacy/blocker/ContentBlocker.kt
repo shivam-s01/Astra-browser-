@@ -14,16 +14,26 @@ import javax.inject.Singleton
  * Request-level ad/tracker blocker.
  *
  * Light + cool-running by design:
- *  - Host list lives in assets/ and is loaded ONCE into a HashSet (O(1)
- *    lookups, no per-request regex over thousands of rules).
+ *  - Host list lives in assets/ (~8.5k hosts: AdAway + EasyList/EasyPrivacy
+ *    domain-anchor rules + curated additions) and is loaded ONCE into a
+ *    HashSet (O(1) lookups, no per-request regex over thousands of rules).
  *  - A host is checked by walking parent domains (a.b.c.com -> b.c.com ->
  *    c.com), so subdomains of a listed host are covered without storing them.
+ *  - Beyond hosts, a small hand-picked set of unambiguous ad/tracker PATH
+ *    fragments (adPathFragments/trackerPathFragments) catches same-domain
+ *    ad endpoints -- e.g. YouTube's own ad-request calls -- that a host list
+ *    alone can't, without the false-positive risk of importing EasyList's
+ *    full generic-path ruleset wholesale.
+ *  - Cosmetic filtering (cosmeticCss()) hides the leftover empty containers
+ *    once a network request is blocked, using a filtered subset of
+ *    EasyList's generic attribute-based hide rules -- picked for being both
+ *    cross-site-safe and cheap to match, not the full ~13.6k rule set.
  *  - Only cheap string checks run on the hot path (shouldInterceptRequest
  *    fires for EVERY resource, on Chromium's IO threads).
  *  - Thread-safe: all shared state uses concurrent collections / @Volatile.
  *
- * CI can drop a full EasyList/EasyPrivacy-derived hosts file at
- * assets/blocklist_hosts.txt (see build.yml) with no code change.
+ * CI can drop a freshly generated assets/blocklist_hosts.txt (one host per
+ * line) with no code change required.
  */
 @Singleton
 class ContentBlocker @Inject constructor(
@@ -48,17 +58,39 @@ class ContentBlocker @Inject constructor(
         FALLBACK_HOSTS
     }
 
-    // Ad-delivery path fragments. Small and specific on purpose: broad
-    // patterns cause false positives that break real sites. Only applied to
-    // THIRD-PARTY requests.
+    // Ad-delivery path fragments, checked against BOTH first- and
+    // third-party requests (see matchesFragment) since several of these --
+    // notably the YouTube ones -- are first-party by nature. Kept specific
+    // on purpose: broad/short fragments cause false positives that break
+    // real sites, which matters more now that first-party is in scope too.
     private val adPathFragments = arrayOf(
         "/pagead/", "/adserver/", "/adframe", "/doubleclick/", "/googleads",
-        "/show_ads", "/adsbygoogle", "/prebid", "/pop-under", "/popunder", "/ima3.js"
+        "/show_ads", "/adsbygoogle", "/prebid", "/pop-under", "/popunder", "/ima3.js",
+        // YouTube/Google Video ad-request endpoints. These are path-specific
+        // (not the whole youtube.com/googlevideo.com host, which would break
+        // playback) so only the ad break itself is dropped, not the video.
+        "/api/stats/ads", "/pagead/interaction", "/pagead/adview",
+        "/ptracking", "/get_midroll", "/annotations_invideo", "/gen_204?",
+        // Generic in-stream video ad tags used across most video sites.
+        // Full "/vast" + separator, not a bare "vast2"/"vast3" -- a bare
+        // version-number fragment risks matching an unrelated path
+        // (e.g. "/campaign/vast2023/") now that first-party is in scope.
+        "/vast.xml", "/vast?", "/vast/", "/vmap.xml", "/vmap?", "/adtagurl"
     )
 
     private val trackerPathFragments = arrayOf(
         "/analytics.js", "/gtag/js", "/gtm.js", "/fbevents.js", "/pixel.gif",
-        "/__utm.gif", "/tracking.js"
+        "/__utm.gif", "/tracking.js", "/collect?", "/beacon.js", "/telemetry",
+        "/log_event", "/csi?", "/stats.g.doubleclick",
+        // Added from EasyPrivacy's most common unambiguous tracker path
+        // shapes. Deliberately NOT including broad segments like "/api/",
+        // "/js/", "/assets/" that also showed up frequently in that data --
+        // those are used by countless legitimate site features too and
+        // would break real pages; only fragments whose name itself is
+        // tracking-specific made the cut.
+        "/tracker.js", "/track.js", "/tracking.gif", "/tracking.png",
+        "/analytics.gif", "/analytics.png", "/metrics.js", "/pixel.png",
+        "/pixel.js", "/beacon.gif", "/collector.js"
     )
 
     fun setGlobalEnabled(tracking: Boolean, ads: Boolean) {
@@ -94,11 +126,21 @@ class ContentBlocker @Inject constructor(
         if (!isEnabledFor(pageOrigin)) return null
 
         val url = request.url
+        val urlStr = url.toString()
         val host = url.host?.lowercase() ?: return null
 
+        // Explicit allow-list checked FIRST, before any block logic. This is
+        // the equivalent of EasyList's "@@" exception rules: a small, hand
+        // -picked set of requests that would otherwise match a block
+        // pattern but are actually required for a site's core functionality
+        // to work (e.g. YouTube's own video-metadata endpoint). Kept tiny on
+        // purpose -- this is a safety valve for known false positives, not
+        // a general carve-out mechanism.
+        if (isExplicitlyAllowed(urlStr)) return null
+
         val blocked = isBlockedHost(host) ||
-            (adBlockingEnabled && matchesFragment(url.toString(), adPathFragments, pageOrigin, host)) ||
-            (trackingProtectionEnabled && matchesFragment(url.toString(), trackerPathFragments, pageOrigin, host))
+            (adBlockingEnabled && matchesFragment(urlStr, adPathFragments, pageOrigin, host, thirdPartyOnly = false)) ||
+            (trackingProtectionEnabled && matchesFragment(urlStr, trackerPathFragments, pageOrigin, host, thirdPartyOnly = true))
 
         if (!blocked) return null
 
@@ -116,8 +158,27 @@ class ContentBlocker @Inject constructor(
         }
     }
 
-    private fun matchesFragment(url: String, fragments: Array<String>, pageOrigin: String?, host: String): Boolean {
-        if (isFirstParty(pageOrigin, host)) return false
+    private fun isExplicitlyAllowed(url: String): Boolean {
+        val lower = url.lowercase()
+        for (a in ALLOWLIST_FRAGMENTS) if (lower.contains(a)) return true
+        return false
+    }
+
+    /**
+     * [thirdPartyOnly] matters a lot: the original code always skipped
+     * first-party requests here to avoid false positives on generic
+     * patterns. But the YouTube/video-ad path fragments in [adPathFragments]
+     * (e.g. "/api/stats/ads", "/get_midroll") are FIRST-PARTY requests --
+     * they go to youtube.com / googlevideo.com, the exact same registrable
+     * domain as the page itself. Always requiring third-party meant those
+     * patterns could never fire on the site they were written for, silently
+     * defeating the whole YouTube ad-block path. So ad-path fragments check
+     * regardless of party; tracker fragments (analytics/pixels) stay
+     * third-party-only since those DO commonly false-positive on a site's
+     * own first-party analytics endpoints.
+     */
+    private fun matchesFragment(url: String, fragments: Array<String>, pageOrigin: String?, host: String, thirdPartyOnly: Boolean): Boolean {
+        if (thirdPartyOnly && isFirstParty(pageOrigin, host)) return false
         val lower = url.lowercase()
         for (f in fragments) if (lower.contains(f)) return true
         return false
@@ -174,6 +235,20 @@ class ContentBlocker @Inject constructor(
             "amazon-adsystem.com", "popads.net", "propellerads.com", "exoclick.com"
         )
 
+        // Known false-positive safety valve (EasyList's equivalent of an
+        // "@@" exception rule): requests that would otherwise be caught by
+        // a block pattern above but are actually required for real site
+        // functionality. Checked before any block logic in intercept().
+        // Currently empty in the shipped default -- add an entry here only
+        // when a SPECIFIC site is confirmed broken by a SPECIFIC block
+        // pattern, not preemptively.
+        val ALLOWLIST_FRAGMENTS = arrayOf<String>(
+            // e.g. "youtube.com/get_video_info" -- kept as a documented
+            // example of the intended shape, not an active rule (this
+            // request isn't matched by anything in adPathFragments or
+            // trackerPathFragments in the first place).
+        )
+
         // 1x1 transparent GIF so blocked <img> ads don't show a broken-image icon.
         val TRANSPARENT_GIF = byteArrayOf(
             0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80.toByte(), 0x00, 0x00,
@@ -205,7 +280,33 @@ class ContentBlocker @Inject constructor(
             // Explicit ad-labeled download-lookalike buttons only (never a
             // generic href/class pattern -- that risks hiding real download
             // buttons on legitimate file-host sites).
-            ".download-ad,.fake-download,[class*=\"dl-ad\"],[id*=\"dl-ad\"]" +
+            ".download-ad,.fake-download,[class*=\"dl-ad\"],[id*=\"dl-ad\"]," +
+            // Extracted from EasyList's generic (domain-less) hide rules --
+            // ~13.6k such rules exist upstream, but injecting all of them
+            // as one CSS blob would cost real selector-matching time on
+            // every page load, which fights the "low CPU" goal. This is a
+            // filtered subset: only attribute selectors (cheap families,
+            // one rule catches many elements) whose attribute name/value
+            // unambiguously signals "ad" -- no bare IDs/classes (too
+            // site-specific to be worth 4000+ extra rules) and nothing
+            // matching on inline style= (fragile, risks hiding unrelated
+            // elements that happen to share a style string).
+            "[class^=\"adDisplay-module\"],[class^=\"amp-ad-\"],[class^=\"tile-picker__CitrusBannerContainer-sc-\"]," +
+            "[data-ad-cls],[data-ad-manager-id],[data-ad-module],[data-ad-name],[data-ad-width]," +
+            "[data-block-type=\"ad\"],[data-d-ad-id],[data-desktop-ad-id],[data-id^=\"div-gpt-ad\"]," +
+            "[data-identity=\"adhesive-ad\"],[data-m-ad-id],[data-mobile-ad-id]," +
+            "[data-template-type=\"nativead\"],[data-testid=\"adBanner-wrapper\"],[data-testid=\"ad_testID\"]," +
+            "[data-testid=\"prism-ad-wrapper\"],[id^=\"ad-wrap-\"],[id^=\"ad_sky\"],[id^=\"ad_slider\"]," +
+            "[id^=\"section-ad-banner\"],[name^=\"google_ads_iframe\"]," +
+            "aside[aria-label=\"retailmedia.complimentarySponsored\"],aside[id^=\"adrotate_widgets-\"]," +
+            "div[aria-label=\"Ads\"],div[class^=\"Adstyled__AdWrapper-\"],div[data-ad-placeholder]," +
+            "div[data-ad-region],div[data-ad-targeting],div[data-ad-wrapper],div[id^=\"ad-div-\"]," +
+            "div[id^=\"ad-position-\"],div[id^=\"ad_position_\"],div[id^=\"adngin-\"]," +
+            "div[id^=\"adrotate_widgets-\"],div[id^=\"adspot-\"],div[id^=\"apn_native_ad_slot_\"]," +
+            "div[id^=\"dfp-ad-\"],div[id^=\"div-ads-\"],div[id^=\"ezoic-pub-ad-\"],div[id^=\"gpt_ad_\"]," +
+            "div[id^=\"lazyad-\"],div[id^=\"sticky_ad_\"],div[id^=\"vuukle-ad-\"],div[ow-ad-unit-wrapper]," +
+            "ins.adsbygoogle[data-ad-client],ins.adsbygoogle[data-ad-slot]," +
+            "span[id^=\"ezoic-pub-ad-placeholder-\"]" +
             "{display:none!important;visibility:hidden!important;height:0!important;min-height:0!important;pointer-events:none!important}"
     }
 }

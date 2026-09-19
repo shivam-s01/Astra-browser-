@@ -145,8 +145,12 @@ class AstraWebViewClient(
         request: WebResourceRequest
     ): WebResourceResponse? {
         // Runs on a Chromium IO thread: never call WebView methods here.
-        // Read the page URL from TabManager's in-memory state instead.
-        val pageUrl = tabManager.tabs.value.find { it.id == tabId }?.url ?: ""
+        // O(1) lookup via TabManager.urlForTab (a HashMap) instead of a
+        // linear scan of the full tab list -- this runs on EVERY single
+        // sub-resource of every page (every image/script/font/XHR, easily
+        // hundreds on a heavy/ad-dense download or streaming site), so it's
+        // the hottest path in the whole content-blocking pipeline.
+        val pageUrl = tabManager.urlForTab(tabId) ?: ""
         val pageOrigin = contentBlocker.originOf(pageUrl)
         contentBlocker.intercept(tabId, pageOrigin, request)?.let { return it }
         return super.shouldInterceptRequest(view, request)
@@ -155,6 +159,23 @@ class AstraWebViewClient(
     override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) {
         handler.cancel()
         tabManager.updateTab(tabId) { it.copy(isSecure = false, isLoading = false) }
+    }
+
+    /**
+     * Heavy/ad-dense sites (exactly the download-portal case this browser
+     * is regularly used on) are the most likely pages to crash the
+     * Chromium renderer process on a low-end device -- too many
+     * simultaneous video/script/iframe loads exhausting the renderer's own
+     * memory. Without overriding this, that crash takes the WHOLE APP down
+     * with it (the system's default behavior). Returning true here tells
+     * Android we've handled it: the crashed WebView instance is now unusable
+     * per WebView's own contract and must not be interacted with further,
+     * so it's swapped out for a fresh one in the same tab slot instead of
+     * touching the dead instance.
+     */
+    override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+        tabManager.replaceCrashedWebView(tabId, view)
+        return true
     }
 
     /**

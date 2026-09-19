@@ -7,6 +7,7 @@ import com.astra.browser.domain.model.Tab
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -91,6 +92,150 @@ class TabManager @Inject constructor(
         wv.post { block(wv) }
     }
 
+    // Set by refreshPlaybackSnapshot() once its query resolves; read (and
+    // cleared) by confirmPlaybackAndFreeze(). @Volatile: written from a
+    // main-thread JS callback, read from onStop() -- same thread in
+    // practice, but this is free insurance against that assumption
+    // changing.
+    @Volatile private var lastPlaybackSnapshot: Map<String, Boolean>? = null
+
+    // Bumped on every refreshPlaybackSnapshot()/confirmPlaybackAndFreeze()
+    // call so a query's async result can tell whether it's still the
+    // current one. Without this, a slow onPause() query landing AFTER
+    // onStop() already consumed (and cleared) lastPlaybackSnapshot would
+    // silently write a stale answer that sits there until the NEXT
+    // background cycle reads it -- i.e. this app-open's playback state
+    // leaking into next time the app backgrounds.
+    private val snapshotGeneration = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /**
+     * Queries every WebView's own JS for genuine <video>/<audio> playback
+     * state and caches the result for confirmPlaybackAndFreeze() to consume.
+     * Called from onPause() -- while the Activity and its WebViews are still
+     * fully live and on-screen -- so evaluateJavascript is guaranteed to get
+     * a timely answer, unlike querying fresh from onStop() where some OEM
+     * skins may already be throttling the WebView by the time that callback
+     * runs.
+     *
+     * Does NOT touch WebView lifecycle (onPause/onResume/pauseTimers) --
+     * onPause() can fire for things that don't actually hide the app (a
+     * permission dialog, split-screen losing focus), so freezing anything
+     * here would visibly stop video the user can still see.
+     */
+    fun refreshPlaybackSnapshot() {
+        lastPlaybackSnapshot = null
+        val myGen = snapshotGeneration.incrementAndGet()
+        queryPlaybackState { result ->
+            if (snapshotGeneration.get() == myGen) lastPlaybackSnapshot = result
+            // else: superseded (confirmPlaybackAndFreeze already consumed
+            // and moved on, or another refresh started) -- drop it.
+        }
+    }
+
+    /**
+     * Called from onStop(), once the app is confirmed to actually be going
+     * to the background: tabs confirmed genuinely playing stay running
+     * (audio survives backgrounding), everything else freezes to save
+     * CPU/heat.
+     *
+     * Prefers the snapshot onPause() already queried (queried while
+     * everything was still guaranteed responsive) if it finished in time;
+     * onStop() can in rare cases follow onPause() fast enough that the
+     * async JS callbacks haven't all landed yet, so as a fallback this
+     * kicks off (and waits on) a fresh query of its own rather than
+     * guessing. Idempotent either way.
+     */
+    fun confirmPlaybackAndFreeze() {
+        val cached = lastPlaybackSnapshot
+        lastPlaybackSnapshot = null
+        snapshotGeneration.incrementAndGet() // invalidate any in-flight refreshPlaybackSnapshot query
+        if (cached != null) {
+            applyFreezeDecision(webViews.toMap(), cached)
+            return
+        }
+        queryPlaybackState { results -> applyFreezeDecision(webViews.toMap(), results) }
+    }
+
+    /**
+     * Ground-truth "is anything genuinely playing" query, shared by
+     * onPause()'s early check and onStop()'s fallback. All results are
+     * collected before [onResult] is invoked; a callback that never fires
+     * (OEM quirk, WebView torn down mid-call) is covered by a 400ms
+     * timeout -- generous for a same-process JS eval that normally
+     * completes in single-digit ms -- so a stuck tab can't block the
+     * decision forever.
+     */
+    private fun queryPlaybackState(onResult: (Map<String, Boolean>) -> Unit) {
+        if (webViews.isEmpty()) {
+            onResult(emptyMap())
+            return
+        }
+        val pending = webViews.toMap() // snapshot: safe if tabs open/close mid-flight
+        val results = ConcurrentHashMap<String, Boolean>()
+        val decided = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        fun finishOnce() {
+            if (decided.compareAndSet(false, true)) onResult(results.toMap())
+        }
+
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ finishOnce() }, 400)
+
+        pending.forEach { (id, wv) ->
+            runCatching {
+                wv.evaluateJavascript(
+                    """
+                    (function(){
+                        var playing = false;
+                        document.querySelectorAll('video, audio').forEach(function(e){
+                            if (!e.paused && !e.ended && e.readyState > 2) playing = true;
+                        });
+                        return playing;
+                    })();
+                    """.trimIndent()
+                ) { result ->
+                    results[id] = (result == "true")
+                    if (results.size == pending.size) finishOnce()
+                }
+            }.onFailure {
+                // WebView was destroyed between snapshot and this call; count
+                // it as answered (not playing) so the others aren't blocked
+                // waiting on a response that will never arrive.
+                results[id] = false
+                if (results.size == pending.size) finishOnce()
+            }
+        }
+    }
+
+    /**
+     * Applies playback results to WebViews: tabs confirmed genuinely
+     * playing stay running, everything else freezes. A tab opened after the
+     * query was taken simply has no entry in [results], which reads as "not
+     * confirmed playing" below -- the safe default (freeze) rather than
+     * guessing.
+     *
+     * All results are applied before the single pauseTimers()/resumeTimers()
+     * call at the end. Those two are process-wide statics (see
+     * onAppBackgrounded), so the combined outcome must be known before
+     * either is called -- calling per-tab as results trickled in earlier
+     * was the actual bug this function replaced.
+     */
+    private fun applyFreezeDecision(webViewsSnapshot: Map<String, WebView>, results: Map<String, Boolean>) {
+        val anyPlaying = results.values.any { it }
+        webViewsSnapshot.forEach { (id, wv) ->
+            // A tab can close (and destroy() its WebView) in the small
+            // window between snapshotting and this call. Calling lifecycle
+            // methods on an already-destroyed WebView isn't guaranteed
+            // safe, so guard it.
+            runCatching {
+                if (results[id] == true) wv.onResume() else wv.onPause()
+            }
+        }
+        val anyLive = webViewsSnapshot.values.firstOrNull()
+        if (anyLive != null) {
+            runCatching { if (anyPlaying) anyLive.resumeTimers() else anyLive.pauseTimers() }
+        }
+    }
+
     /**
      * App went to the background. Freeze every INACTIVE tab (saves CPU/heat),
      * but if [keepMediaAlive] is true leave the WebViews running so audio
@@ -102,6 +247,10 @@ class TabManager @Inject constructor(
             webViews.values.forEach { it.onResume(); it.resumeTimers() }
         } else {
             webViews.values.forEach { it.onPause() }
+            // WebView.pauseTimers() is a PROCESS-WIDE static call, not
+            // per-instance -- calling it once affects every WebView in the
+            // app. Calling it on more than one instance would be redundant,
+            // not "more paused".
             webViews.values.firstOrNull()?.pauseTimers()
         }
     }
@@ -127,7 +276,68 @@ class TabManager @Inject constructor(
 
     fun getWebView(tabId: String): WebView? = webViews[tabId]
 
+    /**
+     * Pauses whatever tab is about to stop being the active one, unless
+     * it's confirmed still playing audio/video. Shared by createTab() and
+     * switchTo() -- opening a new tab is exactly as much of an "away from
+     * this tab" event as switching to an existing one, and was previously
+     * left out, so opening tabs while a heavy site sat in the background
+     * still burned CPU on it.
+     */
+    private fun pauseIfNoLongerActive(tabId: String?) {
+        if (tabId == null) return
+        if (!mediaPlaybackBridge.isPlaying(tabId)) {
+            webViews[tabId]?.let { runCatching { it.onPause() } }
+        }
+    }
+
+    /**
+     * Called by AstraWebViewClient.onRenderProcessGone when a tab's renderer
+     * process crashes -- most likely on a heavy/ad-dense site overloading a
+     * low-end device's renderer. Per WebView's own contract, a WebView whose
+     * render process died is permanently unusable: calling destroy() (or
+     * almost anything else) on it can itself throw/crash, so the dead
+     * instance is only detached from its parent view and dropped, never
+     * interacted with further. A brand-new WebView is created in its place
+     * under the SAME tab ID, so the tab survives (title, position in the
+     * tab list, etc.) even though the underlying renderer had to restart --
+     * exactly what real browsers do here instead of taking the whole app
+     * down.
+     */
+    fun replaceCrashedWebView(tabId: String, deadWebView: WebView) {
+        val tab = _tabs.value.find { it.id == tabId } ?: return
+        val wasActive = _activeTabId.value == tabId
+        val urlToRestore = tab.url
+
+        runCatching { (deadWebView.parent as? android.view.ViewGroup)?.removeView(deadWebView) }
+
+        val context = deadWebView.context
+        val freshWebView = createConfiguredWebView(context, tab.isPrivate)
+        freshWebView.addJavascriptInterface(mediaPlaybackBridge.jsInterfaceFor(tabId), "AstraMedia")
+        freshWebView.addJavascriptInterface(BackgroundStateBridge(), "AstraBackgroundState")
+        webViews[tabId] = freshWebView
+        webViewConfigurer?.invoke(tabId, freshWebView)
+
+        // A brand-new WebView has no load history of its own (its `update`
+        // block in AstraWebViewHost would otherwise think tab.url is
+        // already loaded and skip it), so load directly here as the
+        // immediate, authoritative restore rather than relying on that
+        // comparison to notice on the next recomposition.
+        if (urlToRestore.isNotBlank()) {
+            freshWebView.loadUrl(urlToRestore)
+        }
+        if (!wasActive) {
+            // Off-screen crashed tab: keep it frozen like any other
+            // background tab until the user actually switches to it,
+            // rather than burning CPU re-rendering a page nobody's looking
+            // at yet.
+            runCatching { freshWebView.onPause() }
+        }
+        updateTab(tabId) { it.copy(isLoading = urlToRestore.isNotBlank()) }
+    }
+
     fun createTab(context: Context, isPrivate: Boolean = false, url: String? = null): Tab {
+        val previous = _activeTabId.value
         val tab = Tab(isPrivate = isPrivate, url = url ?: "", isBlankTab = url.isNullOrBlank())
         val webView = createConfiguredWebView(context, isPrivate)
         webView.addJavascriptInterface(mediaPlaybackBridge.jsInterfaceFor(tab.id), "AstraMedia")
@@ -135,8 +345,10 @@ class TabManager @Inject constructor(
         webViews[tab.id] = webView
         webViewConfigurer?.invoke(tab.id, webView)
         _tabs.update { it + tab }
+        tabUrlCache[tab.id] = tab.url
         _activeTabId.value = tab.id
         if (!url.isNullOrBlank()) webView.loadUrl(url)
+        pauseIfNoLongerActive(previous)
         return tab
     }
 
@@ -158,6 +370,7 @@ class TabManager @Inject constructor(
             destroy()
         }
         webViews.remove(tabId)
+        tabUrlCache.remove(tabId)
         mediaPlaybackBridge.clearTab(tabId)
         _tabs.update { list -> list.filterNot { it.id == tabId } }
 
@@ -170,6 +383,7 @@ class TabManager @Inject constructor(
     fun closeAllTabs() {
         webViews.values.forEach { it.stopLoading(); it.destroy() }
         webViews.clear()
+        tabUrlCache.clear()
         _tabs.value = emptyList()
         _activeTabId.value = null
     }
@@ -179,10 +393,29 @@ class TabManager @Inject constructor(
         privateIds.forEach { closeTab(it) }
     }
 
+    /**
+     * Switching tabs is where a LOT of unnecessary heat/battery drain was
+     * coming from: this used to only flip which tab is considered "active"
+     * in the UI, while every WebView -- including every tab NOT on screen
+     * -- kept running its JS timers, animations, and rendering at full
+     * speed indefinitely. Open 4-5 heavy sites (exactly the ad-heavy
+     * download-portal case this browser is built for) and all of them were
+     * burning CPU simultaneously even though only one was ever visible.
+     *
+     * Fix: pause every other tab's WebView when switching away from it,
+     * unless MediaPlaybackBridge confirms it's actually playing audio/video
+     * (that tab needs to keep running so the sound doesn't cut out) or
+     * background playback would otherwise keep it alive anyway. The tab
+     * being switched TO always resumes.
+     */
     fun switchTo(tabId: String) {
         if (_tabs.value.any { it.id == tabId }) {
+            val previous = _activeTabId.value
             _activeTabId.value = tabId
             updateTab(tabId) { it.copy(lastAccessedAt = System.currentTimeMillis()) }
+
+            webViews[tabId]?.let { runCatching { it.onResume() } }
+            if (previous != tabId) pauseIfNoLongerActive(previous)
         }
     }
 
@@ -193,7 +426,20 @@ class TabManager @Inject constructor(
 
     fun updateTab(tabId: String, transform: (Tab) -> Tab) {
         _tabs.update { list -> list.map { if (it.id == tabId) transform(it) else it } }
+        _tabs.value.find { it.id == tabId }?.let { tabUrlCache[tabId] = it.url }
     }
+
+    // O(1) URL lookup for shouldInterceptRequest, which previously did a
+    // linear scan of the full tab list on EVERY single network sub-resource
+    // of every page (every image, script, font, XHR -- easily hundreds on a
+    // heavy/ad-dense site). With more tabs open, that scan got proportionally
+    // slower on exactly the hot path that runs most often. A plain HashMap
+    // keyed by tab ID, kept in sync wherever a tab's URL can change, turns
+    // that into a single map lookup regardless of tab count.
+    private val tabUrlCache = ConcurrentHashMap<String, String>()
+
+    /** O(1) equivalent of `tabs.value.find { it.id == tabId }?.url` for the WebView IO-thread hot path. */
+    fun urlForTab(tabId: String): String? = tabUrlCache[tabId]
 
     fun tabCount(includePrivate: Boolean = true): Int =
         _tabs.value.count { includePrivate || !it.isPrivate }
@@ -267,7 +513,17 @@ class TabManager @Inject constructor(
                 setSupportZoom(true)
                 builtInZoomControls = true
                 displayZoomControls = false
-                mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                // COMPATIBILITY_MODE (not NEVER_ALLOW): matches what real
+                // desktop/mobile Chrome does today -- blocks genuinely
+                // dangerous active mixed content (scripts, iframes over
+                // HTTP) but tolerates passive content (images, some media)
+                // that's still common on older/less-maintained sites,
+                // notably the ad-heavy download/file-host sites this
+                // browser is regularly used on. NEVER_ALLOW is stricter
+                // than any mainstream browser ships by default and was
+                // silently breaking pages on exactly those sites (missing
+                // images, broken layout, dead-looking download buttons).
+                mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                 // Video sites (YouTube etc.) need this false, or autoplay /
                 // inline playback / fullscreen video breaks on first tap.
                 mediaPlaybackRequiresUserGesture = false
@@ -344,7 +600,14 @@ class TabManager @Inject constructor(
                                           r.height >= window.innerHeight * 0.8;
                     if (!coversViewport) return false;
                     var z = parseInt(cs.zIndex, 10) || 0;
-                    var nearInvisible = parseFloat(cs.opacity) < 0.15 ||
+                    // Require near-total transparency (not just low opacity)
+                    // AND a transparent background specifically -- a legit
+                    // full-screen modal/lightbox with a dim backdrop
+                    // (opacity ~0.1-0.5, solid rgba background) was getting
+                    // misclassified as a hijack overlay and killed on click,
+                    // which is what made real download buttons on some sites
+                    // look completely dead.
+                    var nearInvisible = parseFloat(cs.opacity) < 0.05 &&
                                          cs.backgroundColor === 'rgba(0, 0, 0, 0)';
                     return z > 1 && nearInvisible;
                 }
